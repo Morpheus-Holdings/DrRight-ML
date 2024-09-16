@@ -1,18 +1,12 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, skewness, kurtosis, count, countDistinct, isnan, when
-import seaborn as sns
-import matplotlib.pyplot as plt
-import itertools
-import pyspark.sql.functions as F
 import pandas as pd
+import pyspark.sql.functions as F
 
-# Initialize Spark session
-spark = SparkSession.builder.appName("EDAAnalyzer").getOrCreate()
 
 class EDAAnalyzer:
 
-    def __init__(self, file_path):
-        self.dataframe = spark.read.parquet(file_path)
+    def __init__(self, spark_session):
+        self.dataframe = spark_session.dataframe
+        self.spark = spark_session.spark
 
     def display_head(self, n=5):
         pandas_df = self.dataframe.limit(n).toPandas()
@@ -24,13 +18,28 @@ class EDAAnalyzer:
         return f"Shape of data: rows: {df_rows}, cols: {df_cols}"
 
     def display_column_info(self):
+
+        # Initialize a list to hold the column information
         column_info = []
         total_rows = self.dataframe.count()
+
+        # Get the first row of the DataFrame
+        first_row = self.dataframe.limit(1).collect()
+        if first_row:
+            first_row = first_row[0].asDict()
+        else:
+            first_row = {}
 
         # Iterate over each column in the DataFrame
         for col, dtype in self.dataframe.dtypes:
             non_null_count = self.dataframe.filter(F.col(col).isNotNull()).count()
             percent_non_null = (non_null_count / total_rows) * 100
+
+            # Initialize min_value, max_value, and max_repeats
+            min_value = None
+            max_value = None
+            max_repeats = None
+            sample_value = first_row.get(col, None)
 
             if dtype in ['int', 'double']:
                 # For numeric columns
@@ -58,10 +67,11 @@ class EDAAnalyzer:
                 'Column Name': col,
                 'Non-null Count': non_null_count,
                 'Percent Non-null': percent_non_null,
-                'Data Type': dtype,
                 'Min Value': min_value,
                 'Max Value': max_value,
-                'Max Repeats': max_repeats
+                'Max Repeats': max_repeats,
+                'Sample': sample_value,
+                'Data Type': dtype
             })
 
         # Convert the list to a pandas DataFrame
