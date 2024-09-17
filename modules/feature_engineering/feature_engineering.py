@@ -1,4 +1,5 @@
 import pyspark.sql.functions as F
+from pandas import DataFrame
 
 
 class FeatureEngineer:
@@ -41,8 +42,12 @@ class FeatureEngineer:
                   how='left') \
             .select('original.*', 'comorbidities.previous_comorbidities')
 
+
         self.print_shape("DataFrame After Final Join", self.dataframe)
 
     def display_head(self, n=5):
         pandas_df = self.dataframe.limit(n).toPandas()
         return pandas_df
+
+    def get_rows_by_column_value(self, column_name: str, value) -> DataFrame:
+        return self.dataframe.filter(self.dataframe[column_name] == value).toPandas()
