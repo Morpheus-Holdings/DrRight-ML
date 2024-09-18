@@ -35,27 +35,24 @@ class EDAAnalyzer:
             non_null_count = self.dataframe.filter(F.col(col).isNotNull()).count()
             percent_non_null = (non_null_count / total_rows) * 100
 
-            # Initialize min_value, max_value, and max_repeats
-            min_value = None
-            max_value = None
-            max_repeats = None
             sample_value = first_row.get(col, None)
+            most_frequent = self.dataframe.groupBy(col).count().orderBy(F.desc('count')).first()
+            most_frequent_value = most_frequent[col]
+            max_repeats = most_frequent['count']
 
             if dtype in ['int', 'double']:
                 # For numeric columns
                 min_value = self.dataframe.agg(F.min(col)).collect()[0][0]
                 max_value = self.dataframe.agg(F.max(col)).collect()[0][0]
-                max_repeats = self.dataframe.groupBy(col).count().agg(F.max('count')).collect()[0][0]
+
             elif dtype == 'string':
                 # For string columns
                 min_value = self.dataframe.agg(F.min(F.length(col))).collect()[0][0]
                 max_value = self.dataframe.agg(F.max(F.length(col))).collect()[0][0]
-                max_repeats = self.dataframe.groupBy(col).count().agg(F.max('count')).collect()[0][0]
             elif dtype.startswith('date'):
                 # For date columns
                 min_value = self.dataframe.agg(F.min(col)).collect()[0][0]
                 max_value = self.dataframe.agg(F.max(col)).collect()[0][0]
-                max_repeats = self.dataframe.groupBy(col).count().agg(F.max('count')).collect()[0][0]
             else:
                 # For other types
                 min_value = None
@@ -71,7 +68,9 @@ class EDAAnalyzer:
                 'Max Value': max_value,
                 'Max Repeats': max_repeats,
                 'Sample': sample_value,
-                'Data Type': dtype
+                'Data Type': dtype,
+                'most_frequent_value': most_frequent_value,
+                'max_repeats': max_repeats
             })
 
         # Convert the list to a pandas DataFrame
@@ -79,3 +78,19 @@ class EDAAnalyzer:
         column_info_df = column_info_df.sort_values(by='Percent Non-null', ascending=False).reset_index(drop=True)
 
         return column_info_df
+
+    def get_top_n_repeated_values(self, column_name: str, n: int):
+
+        column_dtype = dict(self.dataframe.dtypes)[column_name]
+        is_array_column = column_dtype.startswith('array')
+
+        if is_array_column:
+            df_exploded = self.dataframe.withColumn(column_name, F.explode(F.col(column_name)))
+            df_values = df_exploded.select(column_name)
+        else:
+            df_values = self.dataframe.select(column_name)
+
+        df_grouped = df_values.groupBy(column_name).count()
+        df_top_n = df_grouped.orderBy(F.desc("count")).limit(n)
+        pandas_df = df_top_n.toPandas()
+        return pandas_df
