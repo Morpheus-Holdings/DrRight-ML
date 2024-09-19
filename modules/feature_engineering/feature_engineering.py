@@ -27,6 +27,22 @@ class FeatureEngineer:
 
         self.dataframe = df
 
+    def add_procedure_array(self):
+        df = self.dataframe
+        self.print_shape("Initial DataFrame", df)
+
+        window_spec = Window.partitionBy('patient_id').orderBy('claim_statement_from_date') \
+            .rowsBetween(Window.unboundedPreceding, -1)
+
+        df = df.withColumn(
+            'previous_procedure',
+            F.array_distinct(F.collect_list('principal_procedure_code').over(window_spec))
+        )
+
+        self.print_shape("DataFrame After Window Function", df)
+
+        self.dataframe = df
+
     def display_head(self, n=5):
         pandas_df = self.dataframe.limit(n).toPandas()
         return pandas_df
