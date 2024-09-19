@@ -1,5 +1,7 @@
+import numpy as np
 import pandas as pd
 import pyspark.sql.functions as F
+from matplotlib import pyplot as plt
 
 
 class EDAAnalyzer:
@@ -79,7 +81,7 @@ class EDAAnalyzer:
 
         return column_info_df
 
-    def get_top_n_repeated_values(self, column_name: str, n: int):
+    def get_top_n_repeated_values(self, column_name: str, n: int = None):
 
         column_dtype = dict(self.dataframe.dtypes)[column_name]
         is_array_column = column_dtype.startswith('array')
@@ -91,7 +93,9 @@ class EDAAnalyzer:
             df_values = self.dataframe.select(column_name)
 
         df_grouped = df_values.groupBy(column_name).count()
-        df_top_n = df_grouped.orderBy(F.desc("count")).limit(n)
+        df_top_n = df_grouped.orderBy(F.desc("count"))
+        if n:
+            df_top_n = df_top_n.limit(n)
         pandas_df = df_top_n.toPandas()
         return pandas_df
 
@@ -125,3 +129,17 @@ class EDAAnalyzer:
 
         results_df = pd.DataFrame(results)
         return results_df
+
+    def plot_percentile_based_cutoff(self, column_name: str, percentile: int = 90):
+        df_top_n = self.get_top_n_repeated_values(column_name, 1000)
+        percentile_threshold = np.percentile(df_top_n['count'], percentile)
+
+        plt.figure(figsize=(10, 6))
+        plt.hist(df_top_n['count'], bins=30, color='skyblue', alpha=0.7)
+        plt.axvline(percentile_threshold, color='red', linestyle='dashed', linewidth=2, label=f'{percentile}th Percentile = {percentile_threshold}')
+        plt.title(f'Distribution of Repeated Values and {percentile}th Percentile-Based Cutoff for {column_name}')
+        plt.xlabel('Count (Number of Repeats)')
+        plt.ylabel('Frequency')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
