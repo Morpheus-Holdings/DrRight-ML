@@ -94,3 +94,34 @@ class EDAAnalyzer:
         df_top_n = df_grouped.orderBy(F.desc("count")).limit(n)
         pandas_df = df_top_n.toPandas()
         return pandas_df
+
+    def get_fill_counts_for_unique_values(self, column_name: str):
+
+        unique_values = [row[column_name] for row in self.dataframe.select(column_name).distinct().collect()]
+        results = []
+
+        for unique_value in unique_values:
+            if unique_value is None:
+                filtered_df = self.dataframe.filter(F.col(column_name).isNull())
+            else:
+                filtered_df = self.dataframe.filter(F.col(column_name) == unique_value)
+
+            type_count = filtered_df.count()
+
+            for col in self.dataframe.columns:
+                if col == column_name:
+                    continue
+
+                non_null_count = filtered_df.filter(F.col(col).isNotNull()).count()
+                percent_non_null = (non_null_count / type_count) * 100 if type_count > 0 else 0
+
+                results.append({
+                    'Unique Value': unique_value if unique_value is not None else 'None',
+                    'Column': col,
+                    'type_count': type_count,
+                    'Non-null Count': non_null_count,
+                    'Percent Non-null': percent_non_null
+                })
+
+        results_df = pd.DataFrame(results)
+        return results_df
