@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pyspark.sql.functions as F
 from matplotlib import pyplot as plt
+from pandas import DataFrame
 
 
 class EDAAnalyzer:
@@ -42,7 +43,7 @@ class EDAAnalyzer:
             most_frequent_value = most_frequent[col]
             max_repeats = most_frequent['count']
 
-            if dtype in ['int', 'double']:
+            if dtype in ['int', 'double', 'float']:
                 # For numeric columns
                 min_value = self.dataframe.agg(F.min(col)).collect()[0][0]
                 max_value = self.dataframe.agg(F.max(col)).collect()[0][0]
@@ -136,10 +137,24 @@ class EDAAnalyzer:
 
         plt.figure(figsize=(10, 6))
         plt.hist(df_top_n['count'], bins=30, color='skyblue', alpha=0.7)
-        plt.axvline(percentile_threshold, color='red', linestyle='dashed', linewidth=2, label=f'{percentile}th Percentile = {percentile_threshold}')
+        plt.axvline(percentile_threshold, color='red', linestyle='dashed', linewidth=2,
+                    label=f'{percentile}th Percentile = {percentile_threshold}')
         plt.title(f'Distribution of Repeated Values and {percentile}th Percentile-Based Cutoff for {column_name}')
         plt.xlabel('Count (Number of Repeats)')
         plt.ylabel('Frequency')
         plt.legend()
         plt.grid(True)
         plt.show()
+
+    def convert_columns_to_float(self, columns: list):
+
+        df = self.dataframe
+        for column in columns:
+            df = df.withColumn(column, F.col(column).cast('float'))
+            print(f"Casted {column} to float")
+        self.dataframe = df
+
+    def display_column(self, column_name: str) -> DataFrame:
+
+        column_df = self.dataframe.select(column_name)
+        return column_df.toPandas()
