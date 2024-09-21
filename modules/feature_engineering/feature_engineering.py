@@ -49,3 +49,18 @@ class FeatureEngineer:
 
     def get_rows_by_column_value(self, column_name: str, value) -> DataFrame:
         return self.dataframe.filter(self.dataframe[column_name] == value).toPandas()
+
+    def remove_diagnosis_codes(self, diagnosis_list):
+        df = self.dataframe
+
+        df_exploded = df.withColumn("exploded_diagnosis", F.explode(F.col("claim_all_diagnosis_codes")))
+
+        df_filtered = df_exploded.filter(~F.col("exploded_diagnosis.diagnosis_code").isin(diagnosis_list))
+
+        df_filtered = df_filtered.groupBy([col for col in df.columns if col != "claim_all_diagnosis_codes"]).agg(
+            F.collect_list("exploded_diagnosis").alias("claim_all_diagnosis_codes")
+        )
+
+        self.print_shape("DataFrame After Removing Diagnosis Codes", df_filtered)
+        self.dataframe = df_filtered
+

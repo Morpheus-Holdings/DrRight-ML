@@ -94,6 +94,9 @@ class EDAAnalyzer:
             df_values = self.dataframe.select(column_name)
 
         df_grouped = df_values.groupBy(column_name).count()
+        df_grouped = df_grouped.withColumn("diagnosis_code", F.col(f"{column_name}.diagnosis_code"))
+        df_grouped = df_grouped.withColumn("diagnosis_code_length", F.length(F.col("diagnosis_code")))
+
         df_top_n = df_grouped.orderBy(F.desc("count"))
         if n:
             df_top_n = df_top_n.limit(n)
@@ -131,8 +134,10 @@ class EDAAnalyzer:
         results_df = pd.DataFrame(results)
         return results_df
 
-    def plot_percentile_based_cutoff(self, column_name: str, percentile: int = 90):
+    def plot_percentile_based_cutoff(self, column_name: str, percentile: int = 90, cutoff_length: int = None):
         df_top_n = self.get_top_n_repeated_values(column_name, 1000)
+        if cutoff_length:
+            df_top_n = df_top_n[df_top_n['diagnosis_code_length']>cutoff_length]
         percentile_threshold = np.percentile(df_top_n['count'], percentile)
 
         plt.figure(figsize=(10, 6))
