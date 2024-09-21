@@ -64,3 +64,34 @@ class FeatureEngineer:
         self.print_shape("DataFrame After Removing Diagnosis Codes", df_filtered)
         self.dataframe = df_filtered
 
+    def calculate_first_visit_and_duration(self):
+        df = self.dataframe
+        window_spec = Window.partitionBy('patient_id').orderBy('claim_statement_from_date')
+        df = df.withColumn('first_visit_date', F.first('claim_statement_from_date').over(window_spec))
+        df = df.withColumn('days_since_first_visit',
+                           F.datediff(F.col('claim_statement_from_date'), F.col('first_visit_date')))
+
+        self.print_shape("DataFrame After Calculating First Visit Date and Duration", df)
+        self.dataframe = df
+
+    def get_min_max(self, column_name: str):
+        df = self.dataframe
+
+        min_value = df.agg(F.min(column_name)).collect()[0][0]
+        max_value = df.agg(F.max(column_name)).collect()[0][0]
+
+        print(f"Min: {min_value}, Max: {max_value}")
+
+    def add_train_test_indicator(self, test_size: float = 0.2) -> DataFrame:
+
+        unique_patient_ids = self.dataframe.select('patient_id').distinct()
+        test_patient_ids = unique_patient_ids.sample(False, test_size, seed=42).collect()
+
+        test_patient_id_list = [row['patient_id'] for row in test_patient_ids]
+
+        self.dataframe = self.dataframe.withColumn(
+            'train_test',
+            F.when(F.col('patient_id').isin(test_patient_id_list), 'test').otherwise('train')
+        )
+
+        return self.display_head()
