@@ -135,7 +135,9 @@ class EDAAnalyzer:
         return results_df
 
     def plot_percentile_based_cutoff(self, column_name: str, percentile: int = 90, cutoff_length: int = None):
+
         df_top_n = self.get_top_n_repeated_values(column_name, 1000)
+
         if cutoff_length:
             df_top_n = df_top_n[df_top_n['diagnosis_code_length']>cutoff_length]
         percentile_threshold = np.percentile(df_top_n['count'], percentile)
