@@ -62,7 +62,6 @@ class EDAAnalyzer:
                 max_value = None
                 max_repeats = None
 
-            # Append column information to the list
             column_info.append({
                 'Column Name': col,
                 'Non-null Count': non_null_count,
