@@ -27,20 +27,21 @@ class FeatureEngineer:
 
         self.dataframe = df
 
-    def add_procedure_array(self):
+    def add_procedure_array(self, procedure_column):
         df = self.dataframe
-        self.print_shape("Initial DataFrame", df)
-
+        self.print_shape(f"Initial DataFrame for {procedure_column}", df)
+    
         window_spec = Window.partitionBy('patient_id').orderBy('claim_statement_from_date') \
             .rowsBetween(Window.unboundedPreceding, -1)
-
+    
+        # Generalized to work with any procedure column
         df = df.withColumn(
-            'previous_procedure',
-            F.array_distinct(F.collect_list('principal_procedure_code').over(window_spec))
+            f'previous_{procedure_column}_array',
+            F.array_distinct(F.collect_list(procedure_column).over(window_spec))
         )
-
-        self.print_shape("DataFrame After Window Function", df)
-
+    
+        self.print_shape(f"DataFrame After Window Function for {procedure_column}", df)
+    
         self.dataframe = df
 
     def display_head(self, n=5):
