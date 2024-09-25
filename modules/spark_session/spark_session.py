@@ -11,5 +11,6 @@ class SparkManager:
             .config("spark.driver.memory", "4g") \
             .config("spark.sql.shuffle.partitions", "8") \
             .config("spark.sql.autoBroadcastJoinThreshold", "-1") \
+            .config("spark.sql.mapKeyDedupPolicy", "LAST_WIN") \
             .getOrCreate()
         self.dataframe = self.spark.read.parquet(file_path)
