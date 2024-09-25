@@ -64,7 +64,7 @@ class FeatureEngineer:
                 if procedure not in procedure_dict or procedure_dict[procedure] < date:
                     procedure_dict[procedure] = date
                     procedure_order[procedure] = order
-            # Sort the procedures by their update order and return the list of {procedure, date}
+            # Sort the procedures by their original order and return the list of {procedure, date}
             sorted_procedures = sorted(procedure_dict.items(), key=lambda x: procedure_order[x[0]])
             return [(procedure, date) for procedure, date in sorted_procedures]
     
