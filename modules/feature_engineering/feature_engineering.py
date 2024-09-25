@@ -1,7 +1,7 @@
 import pyspark.sql.functions as F
 from pandas import DataFrame
 from pyspark.sql import Window
-
+from pyspark.sql.types import ArrayType, StructType, StructField, StringType, DateType, IntegerType
 
 class FeatureEngineer:
     def __init__(self, spark_manager):
@@ -27,22 +27,70 @@ class FeatureEngineer:
 
         self.dataframe = df
 
-    def add_procedure_array(self, procedure_column):
+    
+    def add_procedure_array(self, procedure_column, date_column):
         df = self.dataframe
         self.print_shape(f"Initial DataFrame for {procedure_column}", df)
     
-        window_spec = Window.partitionBy('patient_id').orderBy('claim_statement_from_date') \
+        # Define a window specification
+        window_spec = Window.partitionBy('patient_id').orderBy('claim_statement_from_date')\
             .rowsBetween(Window.unboundedPreceding, -1)
     
-        # Generalized to work with any procedure column
+        # Step 1: Add an index to preserve the original order of the rows
         df = df.withColumn(
-            f'previous_{procedure_column}_array',
-            F.array_distinct(F.collect_list(procedure_column).over(window_spec))
+            'row_num',
+            F.row_number().over(Window.partitionBy('patient_id').orderBy(F.lit(1)))
         )
     
-        self.print_shape(f"DataFrame After Window Function for {procedure_column}", df)
+        # Step 2: Collect the procedure and date as structs over the window
+        df = df.withColumn(
+            f'{procedure_column}_date_struct',
+            F.struct(
+                F.col(procedure_column).alias('procedure'),
+                F.col(date_column).alias('date'),
+                F.col('row_num').alias('order')
+            )
+        )
+    
+        # Step 3: Define the UDF to keep only the latest occurrence of each procedure, while preserving the order
+        def unique_procedures_with_latest_date(procedure_array):
+            procedure_dict = {}
+            procedure_order = {}
+            for item in procedure_array:
+                procedure = item['procedure']
+                date = item['date']
+                order = item['order']
+                # Only keep the procedure with the latest date
+                if procedure not in procedure_dict or procedure_dict[procedure] < date:
+                    procedure_dict[procedure] = date
+                    procedure_order[procedure] = order
+            # Sort the procedures by their update order and return the list of {procedure, date}
+            sorted_procedures = sorted(procedure_dict.items(), key=lambda x: procedure_order[x[0]])
+            return [(procedure, date) for procedure, date in sorted_procedures]
+    
+        # Create the UDF
+        schema = ArrayType(StructType([
+            StructField("procedure", StringType(), True),
+            StructField("date", DateType(), True)
+        ]))
+    
+        unique_procedures_udf = F.udf(unique_procedures_with_latest_date, schema)
+    
+        # Step 4: Apply collect_list directly and the UDF in a single step
+        df = df.withColumn(
+            f'updated_{procedure_column}_array',
+            unique_procedures_udf(
+                F.collect_list(f'{procedure_column}_date_struct').over(window_spec)
+            )
+        )
+    
+        # Step 5: Drop temporary columns
+        df = df.drop('row_num', f'{procedure_column}_date_struct')
+    
+        self.print_shape(f"DataFrame After Procedure Update for {procedure_column}", df)
     
         self.dataframe = df
+
 
     def display_head(self, n=5):
         pandas_df = self.dataframe.limit(n).toPandas()
