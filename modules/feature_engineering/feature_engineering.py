@@ -1,14 +1,34 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import pyspark.sql.functions as F
+import seaborn as sns
 from pandas import DataFrame
+from pyspark.ml import Pipeline
+from pyspark.ml.feature import StringIndexer, VectorAssembler, OneHotEncoder
 from pyspark.sql import Window
-from pyspark.sql.types import MapType, StringType, DateType
+from pyspark.sql.types import MapType, FloatType, IntegerType, StructType
+from pyspark.sql.types import StringType, DoubleType, DateType, ArrayType
+from tensorflow import keras
+from pyspark.sql.functions import col, when, isnan, count, mean, udf, lit, coalesce
+from tensorflow.keras import layers
+
 
 class FeatureEngineer:
+
+    def get_python_version(self):
+        import sys
+        return sys.version
+
     def __init__(self, spark_manager):
+        self.encoder = None
+        self.autoencoder = None
+        self.encoded_dataframe = None
+        self.encoded_features = None
         self.spark = spark_manager.spark
         self.dataframe = spark_manager.dataframe
 
-    def print_shape(self, message: str,df):
+    def print_shape(self, message: str, df):
         print(f"{message} - Shape: {df.count()} rows, {len(df.columns)} columns")
 
     def add_comorbidities_array(self):
@@ -108,6 +128,18 @@ class FeatureEngineer:
         self.print_shape("DataFrame After Calculating First Visit Date and Duration", df)
         self.dataframe = df
 
+    def add_continuous_visit_years(self):
+
+        df = self.dataframe
+
+        df = df.withColumn('visit_year', F.year(F.col('claim_statement_from_date')))
+        window_spec = Window.partitionBy('patient_id').orderBy('visit_year')
+        df = df.withColumn('row_number', F.row_number().over(window_spec))
+        df = df.withColumn('year_diff', F.col('visit_year') - F.col('row_number'))
+        consecutive_window = Window.partitionBy('patient_id', 'year_diff').orderBy('visit_year')
+        df = df.withColumn('continuous_visit_years', F.row_number().over(consecutive_window))
+        self.dataframe = df
+
     def get_min_max(self, column_name: str):
         df = self.dataframe
 
@@ -130,3 +162,104 @@ class FeatureEngineer:
         )
 
         return self.display_head()
+
+    def impute_missing_values(self):
+        string_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, StringType)]
+        numeric_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, (FloatType, IntegerType, DoubleType))]
+        date_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, DateType)]
+        array_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, ArrayType)]
+
+        for col_name in string_cols:
+            self.dataframe = self.dataframe.withColumn(col_name, when(col(col_name).isNull(), lit('unknown')).otherwise(
+                col(col_name)))
+
+        for col_name in numeric_cols:
+            mean_value = self.dataframe.select(mean(col(col_name))).first()[0]
+            self.dataframe = self.dataframe.fillna({col_name: mean_value})
+
+        for col_name in date_cols:
+            self.dataframe = self.dataframe.withColumn(col_name,
+                                                       when(col(col_name).isNull(), lit('1970-01-01')).otherwise(
+                                                           col(col_name)))
+
+        for col_name in array_cols:
+            self.dataframe = self.dataframe.withColumn(col_name,
+                                                       when(col(col_name).isNull(), lit([])).otherwise(col(col_name)))
+
+    def preprocess_data(self):
+        self.impute_missing_values()
+
+        string_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, StringType)]
+        date_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, DateType)]
+        numeric_cols = [field.name for field in self.dataframe.schema.fields if
+                        isinstance(field.dataType, (FloatType, IntegerType, DoubleType))]
+
+        for date_col in date_cols:
+            if date_col in self.dataframe.columns:
+                self.dataframe = self.dataframe.withColumn(f"{date_col}_year", F.year(col(date_col)).cast(DoubleType())) \
+                    .withColumn(f"{date_col}_month", F.month(col(date_col)).cast(DoubleType())) \
+                    .withColumn(f"{date_col}_day", F.dayofmonth(col(date_col)).cast(DoubleType()))
+
+        for column in string_cols:
+            index_values = self.dataframe.select(column).distinct().rdd.flatMap(lambda x: x).collect()
+            index_dict = {value: idx for idx, value in enumerate(index_values)}
+
+            mapping_df = self.spark.createDataFrame(index_dict.items(), schema=["value", "index"])
+            mapping_df = mapping_df.withColumnRenamed("value", column)
+
+            self.dataframe = self.dataframe.join(mapping_df, on=column, how='left') \
+                .withColumnRenamed("index", f"{column}_index")
+
+        feature_cols = (
+                [f"{column}_index" for column in string_cols] +
+                numeric_cols +
+                [f"{date_col}_year" for date_col in date_cols] +
+                [f"{date_col}_month" for date_col in date_cols] +
+                [f"{date_col}_day" for date_col in date_cols]
+        )
+
+        assembler = VectorAssembler(inputCols=feature_cols, outputCol='features')
+        self.dataframe = assembler.transform(self.dataframe)
+
+    def build_autoencoder(self):
+        input_dim = self.dataframe.select('features').head()[0].size
+
+        inputs = keras.Input(shape=(input_dim,))
+        encoded = layers.Dense(64, activation='relu')(inputs)
+        encoded = layers.Dense(32, activation='relu')(encoded)
+        decoded = layers.Dense(64, activation='relu')(encoded)
+        decoded = layers.Dense(input_dim, activation='sigmoid')(decoded)
+
+        self.autoencoder = keras.Model(inputs, decoded)
+        self.encoder = keras.Model(inputs, encoded)
+
+    def train_autoencoder(self, epochs: int = 50, batch_size: int = 256):
+
+        self.build_autoencoder()
+        feature_data = np.array(self.dataframe.select('features').rdd.map(lambda row: row[0].toArray()).collect())
+
+        self.autoencoder.compile(optimizer='adam', loss='mean_squared_error')
+        self.autoencoder.fit(feature_data, feature_data, epochs=epochs, batch_size=batch_size)
+
+        self.encoded_features = self.encoder.predict(feature_data)
+        self.encoded_dataframe = pd.DataFrame(self.encoded_features)
+
+    def plot_feature_importance_heatmap(self):
+
+        original_feature_names = [column for column in self.dataframe.columns if column != 'features']
+
+        original_features_df = pd.DataFrame(
+            np.array(self.dataframe.select(original_feature_names).collect()),
+            columns=original_feature_names
+        )
+        encoded_features_df = self.encoded_dataframe
+
+        correlation_matrix = pd.concat([original_features_df, encoded_features_df], axis=1).corr().iloc[
+                             :len(original_feature_names), len(original_feature_names):]
+
+        plt.figure(figsize=(12, 8))
+        sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt='.2f', cbar=True)
+        plt.title('Correlation Heatmap: Original Features vs Encoded Features')
+        plt.xlabel('Encoded Features')
+        plt.ylabel('Original Features')
+        plt.show()
