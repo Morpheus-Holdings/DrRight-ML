@@ -73,25 +73,6 @@ class FeatureEngineer:
             )
         )
     
-        # Define a UDF to keep the procedure with the latest date
-        def update_procedure_map(procedure_date_map):
-            if not procedure_date_map:
-                return {}
-            latest_map = {}
-            for procedure, date in procedure_date_map.items():
-                if procedure not in latest_map or date > latest_map[procedure]:
-                    latest_map[procedure] = date
-            return latest_map
-    
-        # Register the UDF with PySpark
-        update_procedure_map_udf = F.udf(update_procedure_map, MapType(StringType(), StringType()))
-    
-        # Apply the UDF to update the procedure map with the latest date for each procedure
-        df = df.withColumn(
-            f'updated_procedure_date_map',
-            update_procedure_map_udf(F.col(f'procedure_date_map'))
-        )
-    
         self.print_shape(f"DataFrame After Window Function for {procedure_column}", df)
     
         # Set the dataframe back to the instance
