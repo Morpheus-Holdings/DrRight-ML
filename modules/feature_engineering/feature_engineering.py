@@ -206,10 +206,10 @@ class FeatureEngineer:
         input_dim = self.dataframe.select('features').head()[0].size
 
         inputs = keras.Input(shape=(input_dim,))
-        encoded = layers.Dense(64, activation='relu')(inputs)
-        encoded = layers.Dense(32, activation='relu')(encoded)
-        decoded = layers.Dense(64, activation='relu')(encoded)
-        decoded = layers.Dense(input_dim, activation='sigmoid')(decoded)
+        # encoded = layers.Dense(64, activation='relu')(inputs)
+        encoded = layers.Dense(32, activation='relu')(inputs)
+        # decoded = layers.Dense(64, activation='relu')(encoded)
+        decoded = layers.Dense(input_dim, activation='sigmoid')(encoded)
 
         self.autoencoder = keras.Model(inputs, decoded)
         self.encoder = keras.Model(inputs, encoded)
@@ -228,19 +228,16 @@ class FeatureEngineer:
     def plot_feature_importance_heatmap(self):
 
         original_feature_names = [column for column in self.dataframe.columns if column != 'features']
+        original_features_df = self.dataframe.select(original_feature_names).toPandas()
 
-        original_features_df = pd.DataFrame(
-            np.array(self.dataframe.select(original_feature_names).collect()),
-            columns=original_feature_names
-        )
-        encoded_features_df = self.encoded_dataframe
+        original_features_df = original_features_df.apply(pd.to_numeric, errors='coerce')
+        combined_df = pd.concat([original_features_df, self.encoded_dataframe], axis=1)
 
-        correlation_matrix = pd.concat([original_features_df, encoded_features_df], axis=1).corr().iloc[
-                             :len(original_feature_names), len(original_feature_names):]
+        numeric_combined_df = combined_df.select_dtypes(include=[float, int])
+        num_original_features = len(original_feature_names)
+        correlation_matrix = numeric_combined_df.corr().iloc[:num_original_features, num_original_features:]
 
         plt.figure(figsize=(12, 8))
         sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', fmt='.2f', cbar=True)
-        plt.title('Correlation Heatmap: Original Features vs Encoded Features')
-        plt.xlabel('Encoded Features')
-        plt.ylabel('Original Features')
+        plt.title("Feature Importance Heatmap")
         plt.show()
