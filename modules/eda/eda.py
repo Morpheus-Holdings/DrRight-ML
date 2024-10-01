@@ -42,6 +42,7 @@ class EDAAnalyzer:
             most_frequent = self.dataframe.groupBy(col).count().orderBy(F.desc('count')).first()
             most_frequent_value = most_frequent[col]
             max_repeats = most_frequent['count']
+            distinct_count = self.dataframe.select(col).distinct().count()
 
             if dtype in ['int', 'double', 'float']:
                 # For numeric columns
@@ -72,7 +73,8 @@ class EDAAnalyzer:
                 'Sample': sample_value,
                 'Data Type': dtype,
                 'most_frequent_value': most_frequent_value,
-                'max_repeats': max_repeats
+                'max_repeats': max_repeats,
+                'distinct_count': distinct_count
             })
 
         # Convert the list to a pandas DataFrame
