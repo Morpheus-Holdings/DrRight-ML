@@ -341,9 +341,8 @@ class FeatureEngineer:
                 diagnosis_code = diagnosis['diagnosis_code']
                 diagnosis_date = diagnosis['diagnosis_date']
 
-                # Ensure the diagnosis_date is in the correct datetime format
                 if diagnosis_date is not None:
-                    # Calculate time difference in days
+
                     time_difference = (current_claim_date - diagnosis_date).days
                     decay_value = np.exp(-decay_rate * time_difference)
 
