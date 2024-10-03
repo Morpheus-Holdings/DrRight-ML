@@ -14,6 +14,8 @@ class SparkManager:
             .config("spark.executor.cores", "2") \
             .config("spark.driver.memory", "8g") \
             .config("spark.sql.optimizer.maxIterations", "200") \
+            .config("spark.network.timeout", "800s") \
+            .config("spark.executor.heartbeatInterval", "60s") \
             .config("spark.sql.shuffle.partitions", "16") \
             .config("spark.sql.autoBroadcastJoinThreshold", "10485760") \
             .config("spark.sql.mapKeyDedupPolicy", "LAST_WIN") \
