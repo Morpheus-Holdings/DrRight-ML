@@ -101,6 +101,20 @@ class FeatureEngineer:
         self.print_shape("DataFrame After Removing Diagnosis Codes", df_filtered)
         self.dataframe = df_filtered
 
+    def remove_procedure_codes(self, procedure_list):
+        df = self.dataframe
+
+        df_exploded = df.withColumn("exploded_procedure", F.explode(F.col("servicelines")))
+
+        df_filtered = df_exploded.filter(~F.col("exploded_procedure.line_level_procedure_code").isin(procedure_list))
+
+        df_filtered = df_filtered.groupBy([col for col in df.columns if col != "servicelines"]).agg(
+            F.collect_list("exploded_procedure").alias("servicelines")
+        )
+
+        self.print_shape("DataFrame After Removing Procedure Codes", df_filtered)
+        self.dataframe = df_filtered
+
     def calculate_first_visit_and_duration(self):
         df = self.dataframe
         window_spec = Window.partitionBy('patient_id').orderBy('claim_statement_from_date')
@@ -374,3 +388,73 @@ class FeatureEngineer:
         self.dataframe = df
 
         self.print_shape("DataFrame After Adding Previous Diagnosis OHE with Exponential Decay", self.dataframe)
+
+    def add_procedures_with_exponential_decay_sparse_vector(self, decay_rate: float = 0.01):
+
+        df = self.dataframe
+        window_spec = Window.partitionBy('patient_id').orderBy('claim_statement_from_date') \
+            .rowsBetween(Window.unboundedPreceding, -1)
+
+        df = df.withColumn(
+            'line_level_procedure_code_date',
+            F.expr("""
+                transform(
+                    servicelines, 
+                    x -> struct(x.line_level_procedure_code as line_level_procedure_code, claim_statement_from_date as line_level_procedure_date)
+                )
+            """)
+        )
+
+        df = df.withColumn(
+            'previous_procedures_with_dates',
+            F.array_distinct(F.flatten(F.collect_list('line_level_procedure_code_date').over(window_spec)))
+        )
+
+        distinct_line_level_procedure_codes = df.select(F.explode('servicelines').alias('procedures')) \
+            .select('procedures.line_level_procedure_code') \
+            .distinct() \
+            .rdd.map(lambda row: row['line_level_procedure_code']) \
+            .collect()
+
+        code_to_index = {code: idx for idx, code in enumerate(distinct_line_level_procedure_codes)}
+
+        def compute_decay(current_claim_date, line_level_procedure_date):
+            decay_values = {}
+
+            for line_level_procedure in line_level_procedure_date:
+                line_level_procedure_code = line_level_procedure['line_level_procedure_code']
+                line_level_procedure_date = line_level_procedure['line_level_procedure_date']
+
+                if line_level_procedure_date is not None:
+
+                    time_difference = (current_claim_date - line_level_procedure_date).days
+                    decay_value = np.exp(-decay_rate * time_difference)
+
+                    if line_level_procedure_code in decay_values:
+                        decay_values[line_level_procedure_code] += decay_value
+                    else:
+                        decay_values[line_level_procedure_code] = decay_value
+
+            indices = []
+            values = []
+
+            for code in distinct_line_level_procedure_codes:
+                if code in decay_values:
+                    indices.append(code_to_index[code])
+                    values.append(decay_values[code])
+                else:
+                    indices.append(code_to_index[code])
+                    values.append(0.0)
+
+            return SparseVector(len(distinct_line_level_procedure_codes), indices, values)
+
+        compute_decay_udf = F.udf(compute_decay, VectorUDT())
+
+        df = df.withColumn(
+            'previous_line_level_procedure_ohe',
+            compute_decay_udf(F.col('claim_statement_from_date'), F.col('previous_procedures_with_dates'))
+        )
+
+        self.dataframe = df
+
+        self.print_shape("DataFrame After Adding Previous Procedures OHE with Exponential Decay", self.dataframe)

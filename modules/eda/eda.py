@@ -104,6 +104,27 @@ class EDAAnalyzer:
         pandas_df = df_top_n.toPandas()
         return pandas_df
 
+    def get_top_n_repeated_procedures(self, column_name: str, n: int = None):
+
+        column_dtype = dict(self.dataframe.dtypes)[column_name]
+        is_array_column = column_dtype.startswith('array')
+
+        if is_array_column:
+            df_exploded = self.dataframe.withColumn(column_name, F.explode(F.col(column_name)))
+            df_values = df_exploded.select(column_name)
+        else:
+            df_values = self.dataframe.select(column_name)
+
+        df_grouped = df_values.groupBy(column_name).count()
+        df_grouped = df_grouped.withColumn("line_level_procedure_code", F.col(f"{column_name}.line_level_procedure_code"))
+        df_grouped = df_grouped.withColumn("line_level_procedure_code_length", F.length(F.col("line_level_procedure_code")))
+
+        df_top_n = df_grouped.orderBy(F.desc("count"))
+        if n:
+            df_top_n = df_top_n.limit(n)
+        pandas_df = df_top_n.toPandas()
+        return pandas_df
+
     def get_fill_counts_for_unique_values(self, column_name: str):
 
         unique_values = [row[column_name] for row in self.dataframe.select(column_name).distinct().collect()]
