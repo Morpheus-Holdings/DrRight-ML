@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import pyspark.sql.functions as F
 import seaborn as sns
-import tensorflow as tf
 from keras import layers
 from pandas import DataFrame
 from pyspark.errors import IllegalArgumentException
