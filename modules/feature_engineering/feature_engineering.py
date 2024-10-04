@@ -232,8 +232,9 @@ class FeatureEngineer:
                     print(f"Error message: {str(e)}")
 
         ohe_columns = [f"{col}_ohe" for col in string_cols if f"{col}_ohe" in self.dataframe.columns]
-        # ['previous_diagnosis_ohe'] + \
+
         self.feature_cols = ohe_columns + numeric_cols + \
+                            ['previous_diagnosis_ohe'] + \
                             [f"{date_col}_year" for date_col in date_cols] + \
                             [f"{date_col}_month" for date_col in date_cols] + \
                             [f"{date_col}_day" for date_col in date_cols]
@@ -271,27 +272,34 @@ class FeatureEngineer:
     def train_autoencoder(self, epochs: int = 50, batch_size: int = 256):
 
         self.build_autoencoder()
-
         self.autoencoder.compile(optimizer='adam', loss='huber_loss')
 
+        self.spark.conf.set("spark.sql.debug.maxToStringFields", 1000)
         self.dataframe.cache()
 
-        steps_per_epoch = self.dataframe.count() // batch_size
+        vector_to_array_udf = F.udf(
+            lambda v: v.toArray().tolist() if v else None,
+            ArrayType(FloatType())
+        )
+
+        self.dataframe = self.dataframe.withColumn("features_array", vector_to_array_udf(self.dataframe["features"]))
+
+        df_rows = 247334
+
+        steps_per_epoch = df_rows // batch_size
+        print(f"Approximate distinct count: {df_rows}")
+        print(f"Steps per epoch: {steps_per_epoch}")
 
         def data_generator(batch_size=256):
             while True:
-                batches = []
-                for row in self.dataframe.collect():
-                    dense_vector = row.features.toArray()
-                    dense_vector = dense_vector.reshape(1, -1)
-                    batches.append(dense_vector)
-                    if len(batches) == batch_size:
-                        batch_data = np.vstack(batches)
+                for start in range(0, steps_per_epoch * batch_size, batch_size):
+
+                    batch_df = self.dataframe.limit(batch_size).select("features_array").rdd
+
+                    for row in batch_df.toLocalIterator():
+
+                        batch_data = np.array(row.features_array).reshape(1, -1)
                         yield batch_data, batch_data
-                        batches = []
-                if batches:
-                    batch_data = np.vstack(batches)
-                    yield batch_data, batch_data
 
         history = self.autoencoder.fit(
             data_generator(batch_size),
@@ -613,3 +621,8 @@ class FeatureEngineer:
         self.dataframe = df
 
         self.print_shape("DataFrame After Adding Previous Procedures OHE with Exponential Decay", self.dataframe)
+
+    def display_shape(self):
+        df_rows = self.dataframe.count()
+        df_cols = len(self.dataframe.columns)
+        return f"Shape of data: rows: {df_rows}, cols: {df_cols}"
