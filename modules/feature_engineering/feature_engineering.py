@@ -1,3 +1,4 @@
+import os
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
@@ -16,6 +17,7 @@ from pyspark.sql.types import FloatType, IntegerType
 from pyspark.sql.types import StringType, DoubleType, DateType, ArrayType
 from tensorflow import keras
 from tensorflow.keras import layers
+import tensorflow as tf
 
 
 class FeatureEngineer:
@@ -25,6 +27,11 @@ class FeatureEngineer:
         return sys.version
 
     def __init__(self, spark_manager):
+        self.feature_name_map = None
+        self.code_to_index_length = None
+        self.ohe_mapping_length = None
+        self.feature_length = None
+        self.ohe_mapping = {}
         self.encoder = None
         self.autoencoder = None
         self.encoded_dataframe = None
@@ -164,8 +171,8 @@ class FeatureEngineer:
 
     def impute_missing_values(self):
         string_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, StringType)]
-        numeric_cols = [field.name for field in self.dataframe.schema.fields if
-                        isinstance(field.dataType, (FloatType, IntegerType, DoubleType))]
+        self.numeric_cols = [field.name for field in self.dataframe.schema.fields if
+                             isinstance(field.dataType, (FloatType, IntegerType, DoubleType))]
         date_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, DateType)]
         array_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, ArrayType)]
 
@@ -175,7 +182,7 @@ class FeatureEngineer:
                 when(col(col_name).isNull() | (col(col_name) == ''), lit('unknown')).otherwise(col(col_name))
             )
 
-        for col_name in numeric_cols:
+        for col_name in self.numeric_cols:
             mean_value = self.dataframe.select(mean(col(col_name))).first()[0]
             self.dataframe = self.dataframe.fillna({col_name: mean_value})
 
@@ -198,7 +205,7 @@ class FeatureEngineer:
                        isinstance(field.dataType, StringType) and field.name not in exclude_cols]
         date_cols = [field.name for field in self.dataframe.schema.fields if
                      isinstance(field.dataType, DateType) and field.name not in exclude_cols]
-        numeric_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, (
+        self.numeric_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, (
             FloatType, IntegerType, DoubleType)) and field.name not in exclude_cols]
 
         for date_col in date_cols:
@@ -213,6 +220,11 @@ class FeatureEngineer:
             try:
                 indexer = StringIndexer(inputCol=string_col, outputCol=index_col).fit(self.dataframe)
                 self.dataframe = indexer.transform(self.dataframe)
+
+                mappings = indexer.labels
+                for idx, value in enumerate(mappings):
+                    self.ohe_mapping[f"{string_col}_{value}_index"] = idx
+
             except Exception as e:
                 print(f"Error in StringIndexer for {string_col} due to error: {e}")
 
@@ -231,9 +243,9 @@ class FeatureEngineer:
                     print(f"Error applying OneHotEncoder to column: {col}")
                     print(f"Error message: {str(e)}")
 
-        ohe_columns = [f"{col}_ohe" for col in string_cols if f"{col}_ohe" in self.dataframe.columns]
+        self.ohe_columns = [f"{col}_ohe" for col in string_cols if f"{col}_ohe" in self.dataframe.columns]
 
-        self.feature_cols = ohe_columns + numeric_cols + \
+        self.feature_cols = self.ohe_columns + self.numeric_cols + \
                             ['previous_diagnosis_ohe'] + \
                             [f"{date_col}_year" for date_col in date_cols] + \
                             [f"{date_col}_month" for date_col in date_cols] + \
@@ -250,16 +262,37 @@ class FeatureEngineer:
 
         print("Preprocessing complete. Feature vector created.")
 
+    def get_ohe_mapping(self):
+        return self.ohe_mapping
+
+    def get_ohe_mapping_length(self):
+        if not self.ohe_mapping_length:
+            self.ohe_mapping_length = len(self.ohe_mapping)
+        return self.ohe_mapping_length
+
+    def get_code_to_index(self):
+        return self.code_to_index
+
+    def get_code_to_index_length(self):
+        if not self.code_to_index_length:
+            self.code_to_index_length = len(self.code_to_index)
+        return self.code_to_index_length
+
+    def get_feature_length(self):
+        if not self.feature_length:
+            self.feature_length = self.dataframe.select('features').head()[0].size
+        return self.feature_length
+
     def build_autoencoder(self):
 
-        input_dim = self.dataframe.select('features').head()[0].size
-        print(f"input_features : {input_dim}")
+        self.feature_length = self.dataframe.select('features').head()[0].size
+        print(f"input_features : {self.feature_length}")
 
-        inputs = keras.Input(shape=(input_dim,))
+        inputs = keras.Input(shape=(self.feature_length,))
         # encoded = layers.Dense(200, activation='relu')(inputs)
         encoded = layers.Dense(100, activation='relu')(inputs)
         # decoded = layers.Dense(200, activation='relu')(encoded)
-        decoded = layers.Dense(input_dim, activation='sigmoid')(encoded)
+        decoded = layers.Dense(self.feature_length, activation='sigmoid')(encoded)
 
         self.autoencoder = keras.Model(inputs, decoded)
         self.encoder = keras.Model(inputs, encoded)
@@ -271,43 +304,54 @@ class FeatureEngineer:
 
     def train_autoencoder(self, epochs: int = 50, batch_size: int = 256):
 
-        self.build_autoencoder()
-        self.autoencoder.compile(optimizer='adam', loss='huber_loss')
-
-        self.spark.conf.set("spark.sql.debug.maxToStringFields", 1000)
         self.dataframe.cache()
+        self.dataframe = self.dataframe.select("features")
 
-        vector_to_array_udf = F.udf(
-            lambda v: v.toArray().tolist() if v else None,
-            ArrayType(FloatType())
-        )
+        strategy = tf.distribute.MirroredStrategy()
 
-        self.dataframe = self.dataframe.withColumn("features_array", vector_to_array_udf(self.dataframe["features"]))
+        with strategy.scope():
+            input_dim = self.dataframe.head()["features"].size
+            inputs = keras.Input(shape=(input_dim,))
+            encoded = keras.layers.Dense(100, activation='relu')(inputs)
+            decoded = keras.layers.Dense(input_dim, activation='sigmoid')(encoded)
 
-        df_rows = 247334
+            self.autoencoder = keras.Model(inputs, decoded)
+            self.encoder = keras.Model(inputs, encoded)
 
+            self.autoencoder.compile(optimizer='adam', loss='huber_loss')
+
+        def spark_to_dataset(dataframe, batch_size):
+            def generator():
+                for row in dataframe.toLocalIterator():
+                    features = row["features"]
+                    yield np.array(features.toArray()), np.array(features.toArray())
+
+            dataset = tf.data.Dataset.from_generator(
+                generator,
+                output_signature=(
+                    tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                    tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                )
+            )
+            dataset = dataset.batch(batch_size).repeat()
+            return dataset
+
+        tf_dataset = spark_to_dataset(self.dataframe, batch_size)
+        tf_dataset = tf_dataset.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
+
+        df_rows = self.dataframe.count()
         steps_per_epoch = df_rows // batch_size
         print(f"Approximate distinct count: {df_rows}")
         print(f"Steps per epoch: {steps_per_epoch}")
 
-        def data_generator(batch_size=256):
-            while True:
-                for start in range(0, steps_per_epoch * batch_size, batch_size):
-
-                    batch_df = self.dataframe.limit(batch_size).select("features_array").rdd
-
-                    for row in batch_df.toLocalIterator():
-
-                        batch_data = np.array(row.features_array).reshape(1, -1)
-                        yield batch_data, batch_data
-
         history = self.autoencoder.fit(
-            data_generator(batch_size),
+            tf_dataset,
             steps_per_epoch=steps_per_epoch,
             epochs=epochs,
             verbose=2
         )
 
+        self.dataframe.unpersist()
         return history
 
     def plot_feature_importance_heatmap(self):
@@ -365,11 +409,16 @@ class FeatureEngineer:
             F.array_distinct(F.flatten(F.collect_list('diagnosis_code_date').over(window_spec)))
         )
 
-        distinct_diagnosis_codes = df.select(F.explode('claim_all_diagnosis_codes').alias('diagnosis')) \
-            .select('diagnosis.diagnosis_code') \
-            .distinct() \
-            .rdd.map(lambda row: row['diagnosis_code']) \
-            .collect()
+        self.dataframe = self.dataframe.withColumn(
+            'claim_all_diagnosis_codes_flat',
+            F.expr("transform(claim_all_diagnosis_codes, x -> x.diagnosis_code)")
+        )
+
+        distinct_diagnosis_codes_df = self.dataframe.select(
+            F.explode('claim_all_diagnosis_codes_flat').alias('diagnosis_code')
+        ).distinct()
+
+        distinct_diagnosis_codes = [row['diagnosis_code'] for row in distinct_diagnosis_codes_df.collect()]
 
         code_to_index = {code: idx for idx, code in enumerate(distinct_diagnosis_codes)}
 
@@ -430,9 +479,11 @@ class FeatureEngineer:
             F.expr("transform(claim_all_diagnosis_codes, x -> x.diagnosis_code)")
         )
 
-        distinct_diagnosis_codes = self.dataframe.select(
-            F.explode('claim_all_diagnosis_codes').alias('diagnosis')
-        ).select('diagnosis.diagnosis_code').distinct().rdd.map(lambda row: row['diagnosis_code']).collect()
+        distinct_diagnosis_codes_df = self.dataframe.select(
+            F.explode('claim_all_diagnosis_codes_flat').alias('diagnosis_code')
+        ).distinct()
+
+        distinct_diagnosis_codes = [row['diagnosis_code'] for row in distinct_diagnosis_codes_df.collect()]
 
         self.update_code_to_index(distinct_diagnosis_codes)
 
@@ -440,7 +491,6 @@ class FeatureEngineer:
 
         def generate_sparse_vector(diagnosis_codes):
             if diagnosis_codes is None:
-
                 size = len(code_to_index)
                 return SparseVector(size, [], [])
 
@@ -519,37 +569,31 @@ class FeatureEngineer:
 
         return correlation_matrix
 
+    from pyspark.sql import DataFrame
+
     def get_sorted_feature_correlations(self):
 
-        features_df = self.dataframe.select('features').toPandas()
-        features_df = features_df.reset_index(drop=True)
+        encoder_output = self.encoder.transform(self.dataframe)
+        features_df = encoder_output.select(
+            self.feature_cols + [col for col in encoder_output.columns if col.startswith("encoded_")])
 
-        features_df['features'] = features_df['features'].apply(
-            lambda x: x.toArray() if isinstance(x, (SparseVector, DenseVector)) else x
-        )
+        correlation_matrix = features_df.stat.corr()
 
-        features_array = np.stack(features_df['features'].values)
+        avg_correlation_list = []
 
-        try:
-            encoder_output = self.encoder.predict(features_array)
-        except Exception as e:
-            print(f"Error during encoding: {e}")
-            return None
+        for feature in self.feature_cols:
+            # Calculate the average correlation of each feature with all encoded features
+            avg_corr = correlation_matrix[feature][len(self.feature_cols):].mean()
+            avg_correlation_list.append((feature, avg_corr))
 
-        encoder_df = pd.DataFrame(encoder_output, columns=[f"encoded_{i}" for i in range(encoder_output.shape[1])])
+        # Create a DataFrame from the average correlations
+        avg_correlation_df = self.spark.createDataFrame(avg_correlation_list,
+                                                        ["Feature", "Average Correlation with Dense Layer"])
 
-        combined_df = pd.concat([pd.DataFrame(features_array), encoder_df], axis=1)
+        # Sort the DataFrame by average correlation in descending order
+        sorted_features_df = avg_correlation_df.orderBy(F.col("Average Correlation with Dense Layer").desc())
 
-        correlation_matrix = combined_df.corr()
-
-        correlation_with_dense = correlation_matrix.iloc[:-encoder_output.shape[1], -encoder_output.shape[1]:]
-
-        avg_correlation = correlation_with_dense.mean(axis=1)
-
-        sorted_features_df = avg_correlation.reset_index()
-        sorted_features_df.columns = ['Feature', 'Average Correlation with Dense Layer']
-        sorted_features_df = sorted_features_df.sort_values(by='Average Correlation with Dense Layer', ascending=False)
-
+        # Return the sorted DataFrame
         return sorted_features_df
 
     def add_procedures_with_exponential_decay_sparse_vector(self, decay_rate: float = 0.01):
@@ -626,3 +670,139 @@ class FeatureEngineer:
         df_rows = self.dataframe.count()
         df_cols = len(self.dataframe.columns)
         return f"Shape of data: rows: {df_rows}, cols: {df_cols}"
+
+    def save_autoencoder(self, save_dir: str):
+
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        autoencoder_save_path = os.path.join(save_dir, "autoencoder.h5")
+        self.autoencoder.save(autoencoder_save_path)
+        print(f"Autoencoder model saved to {autoencoder_save_path}")
+
+        encoder_save_path = os.path.join(save_dir, "encoder.h5")
+        self.encoder.save(encoder_save_path)
+        print(f"Encoder model saved to {encoder_save_path}")
+
+    def load_autoencoder(self, load_dir: str):
+
+        autoencoder_load_path = os.path.join(load_dir, "autoencoder.h5")
+        encoder_load_path = os.path.join(load_dir, "encoder.h5")
+
+        self.autoencoder = keras.models.load_model(autoencoder_load_path)
+        self.autoencoder.compile(optimizer='adam', loss='mse')
+        print(f"Autoencoder model loaded and recompiled from {autoencoder_load_path}")
+
+        self.encoder = keras.models.load_model(encoder_load_path)
+        print(f"Encoder model loaded from {encoder_load_path}")
+
+    def expand_features(self):
+
+        feature_cols = self.feature_cols
+
+        for i, feature_name in enumerate(feature_cols):
+            if feature_name == 'previous_diagnosis_ohe':
+
+                for diagnosis_code, index in self.code_to_index.items():
+                    diagnosis_col = f"diagnosis_{diagnosis_code}"
+                    extract_diagnosis = F.udf(lambda v: float(v[index]) if v is not None else None, FloatType())
+                    self.dataframe = self.dataframe.withColumn(diagnosis_col, extract_diagnosis(col('features')))
+                    print(f"Created column for diagnosis code: {diagnosis_code} (index: {index})")
+            else:
+                extract_feature = F.udf(lambda v: float(v[i]) if v is not None else None, FloatType())
+                self.dataframe = self.dataframe.withColumn(feature_name, extract_feature(col('features')))
+                print(f"Created feature column: {feature_name}")
+
+    def evaluate_feature_impact(self, start_index=None, end_index=None, batch_size=500):
+
+        num_features = self.get_feature_length()
+
+        if start_index is None:
+            start_index = 0
+        if end_index is None:
+            end_index = num_features
+
+        input_data = np.zeros((1, num_features))
+
+        original_output = self.autoencoder.predict(input_data)
+
+        changes = {}
+
+        for i in range(start_index, end_index, batch_size):
+
+            batch_end = min(i + batch_size, end_index)
+            batch_size_current = batch_end - i
+
+            modified_batch = np.tile(input_data, (batch_size_current, 1))
+            for j in range(batch_size_current):
+                modified_batch[j, i + j] = 1
+
+            batch_output = self.autoencoder.predict(modified_batch)
+
+            for j in range(batch_size_current):
+                feature_index = i + j
+                change = np.mean(np.abs(batch_output[j] - original_output))
+                changes[feature_index] = change
+
+        changes_df = pd.DataFrame(list(changes.items()), columns=['Feature Index', 'Impact'])
+
+        changes_df['Feature Name'] = changes_df['Feature Index'].map(self.feature_name_map)
+        changes_df = changes_df.sort_values(by='Impact', ascending=False).reset_index(drop=True)
+
+        return changes_df
+
+    def evaluate_diagnosis_impact(self, diagnosis_code=None, start_index=None, end_index=None):
+        num_features = self.get_feature_length()
+
+        if diagnosis_code is not None:
+            if diagnosis_code not in self.code_to_index:
+                print(f"Diagnosis code {diagnosis_code} doesn't exist")
+                return
+            else:
+
+                start_index = self.get_ohe_mapping_length() + len(self.numeric_cols) + self.code_to_index[diagnosis_code]
+                end_index = start_index + 1
+
+        if start_index is None:
+            start_index = 0
+        if end_index is None:
+            end_index = num_features
+
+        input_data = np.zeros((1, num_features))
+        original_output = self.autoencoder.predict(input_data)
+
+        changes = {}
+
+        for feature_index in range(start_index, end_index):
+
+            modified_data_1 = np.copy(input_data)
+            modified_data_1[:, feature_index] = 1
+
+            output_1 = self.autoencoder.predict(modified_data_1)
+            change = np.mean(np.abs(output_1 - original_output))
+            changes[feature_index] = change
+
+        changes_df = pd.DataFrame(list(changes.items()), columns=['Feature Index', 'Impact'])
+
+        changes_df['Feature Name'] = changes_df['Feature Index'].map(self.feature_name_map)
+        changes_df = changes_df.sort_values(by='Impact', ascending=False).reset_index(drop=True)
+
+        return changes_df
+
+    def create_feature_name_map(self):
+
+        feature_name_map = {}
+        index_counter = 0
+
+        for col, ohe_indices in self.ohe_mapping.items():
+            feature_name_map[index_counter] = f"{col}"
+            index_counter += 1
+
+        for col in self.numeric_cols:
+            feature_name_map[index_counter] = col
+            index_counter += 1
+
+        for diagnosis, idx in self.code_to_index.items():
+            feature_name_map[index_counter + idx] = f"Diagnosis_{diagnosis}"
+
+        self.feature_name_map = feature_name_map
