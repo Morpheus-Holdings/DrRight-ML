@@ -187,3 +187,22 @@ class EDAAnalyzer:
 
         column_df = self.dataframe.select(column_name)
         return column_df.toPandas()
+
+    def plot_percentile_based_procedure_cutoff(self, column_name: str, percentile: int = 90, cutoff_length: int = None):
+
+        df_top_n = self.get_top_n_repeated_procedures(column_name, 1000)
+
+        if cutoff_length:
+            df_top_n = df_top_n[df_top_n['line_level_procedure_code_length']>cutoff_length]
+        percentile_threshold = np.percentile(df_top_n['count'], percentile)
+
+        plt.figure(figsize=(10, 6))
+        plt.hist(df_top_n['count'], bins=30, color='skyblue', alpha=0.7)
+        plt.axvline(percentile_threshold, color='red', linestyle='dashed', linewidth=2,
+                    label=f'{percentile}th Percentile = {percentile_threshold}')
+        plt.title(f'Distribution of Repeated Values and {percentile}th Percentile-Based Cutoff for {column_name}')
+        plt.xlabel('Count (Number of Repeats)')
+        plt.ylabel('Frequency')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
