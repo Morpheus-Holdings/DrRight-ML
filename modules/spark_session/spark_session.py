@@ -1,10 +1,10 @@
 import os
 import sys
 from pyspark.sql import SparkSession
-
+from pyspark.sql.functions import col
 
 class SparkManager:
-    def __init__(self, file_path):
+    def __init__(self, file_path=None, cohort_key=None):
         os.environ["PYSPARK_PYTHON"] = sys.executable
         os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
@@ -21,5 +21,12 @@ class SparkManager:
             .config("spark.sql.mapKeyDedupPolicy", "LAST_WIN") \
             .getOrCreate()
 
-        self.dataframe = self.spark.read.parquet(file_path)
+        if file_path:
+            self.dataframe = self.spark.read.parquet(file_path)
+        else:
+
+            self.dataframe = self.spark.table("doctorright.asset.mx_submits")
+            if cohort_key is not None:
+                self.dataframe = self.dataframe.filter(col("cohort_key") == cohort_key)
+
         self.dataframe = self.dataframe.repartition(200)
