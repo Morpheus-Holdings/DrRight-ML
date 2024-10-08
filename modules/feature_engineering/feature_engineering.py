@@ -806,3 +806,39 @@ class FeatureEngineer:
             feature_name_map[index_counter + idx] = f"Diagnosis_{diagnosis}"
 
         self.feature_name_map = feature_name_map
+
+    def transform_line_level_procedure_codes(self):
+
+        self.dataframe = self.dataframe.withColumn(
+            'line_level_procedure_codes_flat',
+            F.expr("transform(servicelines, x -> x.line_level_procedure_code)")
+        )
+
+        distinct_line_level_procedure_codes = self.dataframe.select(
+            F.explode('servicelines').alias('procedure')
+        ).select('procedure.line_level_procedure_code').distinct().rdd.map(lambda row: row['line_level_procedure_code']).collect()
+
+        self.update_code_to_index(distinct_line_level_procedure_codes)
+
+        code_to_index = self.code_to_index
+
+        def generate_sparse_vector(procedure_codes):
+            if procedure_codes is None:
+
+                size = len(code_to_index)
+                return SparseVector(size, [], [])
+
+            unique_codes = set(procedure_codes)
+            indices = [code_to_index.get(code) for code in unique_codes if code in code_to_index]
+            size = len(code_to_index)
+
+            return SparseVector(size, sorted(indices), [1.0] * len(indices))
+
+        sparse_vector_udf = F.udf(generate_sparse_vector, VectorUDT())
+
+        self.dataframe = self.dataframe.withColumn(
+            'line_level_procedures_ohe',
+            sparse_vector_udf(F.col('line_level_procedure_codes_flat'))
+        )
+
+        return self.display_top_rows_as_pandas("line_level_procedures_ohe")
