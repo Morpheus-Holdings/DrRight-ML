@@ -42,6 +42,7 @@ class FeatureEngineer:
         self.dataframe = spark_manager.dataframe
         self.index_counter = 0
 
+
     def print_shape(self, message: str, df):
         print(f"{message} - Shape: {df.count()} rows, {len(df.columns)} columns")
 
@@ -92,7 +93,8 @@ class FeatureEngineer:
         self.dataframe = df
 
     def display_head(self, n=5):
-        pandas_df = self.dataframe.limit(n).toPandas()
+        limited_df = self.dataframe.limit(n).coalesce(1)
+        pandas_df = limited_df.toPandas()
         return pandas_df
 
     def get_rows_by_column_value(self, column_name: str, value) -> DataFrame:
@@ -223,6 +225,7 @@ class FeatureEngineer:
 
                 mappings = indexer.labels
                 for idx, value in enumerate(mappings):
+                    value = value.replace(",", "")
                     self.ohe_mapping[f"{string_col}_{value}_index"] = idx
 
             except Exception as e:
@@ -448,6 +451,7 @@ class FeatureEngineer:
         )
 
         self.dataframe = df
+        self.code_to_index = code_to_index
         return self.display_top_rows_as_pandas("previous_diagnosis_ohe")
 
     def retain_columns(self, column_list: list):
@@ -696,22 +700,38 @@ class FeatureEngineer:
         self.encoder = keras.models.load_model(encoder_load_path)
         print(f"Encoder model loaded from {encoder_load_path}")
 
-    def expand_features(self):
+    def expand_features(self, selected_columns):
 
         feature_cols = self.feature_cols
 
         for i, feature_name in enumerate(feature_cols):
-            if feature_name == 'previous_diagnosis_ohe':
 
+            if feature_name == 'previous_diagnosis_ohe':
                 for diagnosis_code, index in self.code_to_index.items():
-                    diagnosis_col = f"diagnosis_{diagnosis_code}"
-                    extract_diagnosis = F.udf(lambda v: float(v[index]) if v is not None else None, FloatType())
-                    self.dataframe = self.dataframe.withColumn(diagnosis_col, extract_diagnosis(col('features')))
-                    print(f"Created column for diagnosis code: {diagnosis_code} (index: {index})")
+                    diagnosis_col = f"Diagnosis_{diagnosis_code}"
+                    if diagnosis_col in selected_columns:
+                        extract_diagnosis = F.udf(lambda v: float(v[index]) if v is not None else None, FloatType())
+                        self.dataframe = self.dataframe.withColumn(diagnosis_col,
+                                                                   extract_diagnosis(F.col('features')))
+                        print(f"Created column for diagnosis code: {diagnosis_code} (index: {index})")
             else:
-                extract_feature = F.udf(lambda v: float(v[i]) if v is not None else None, FloatType())
-                self.dataframe = self.dataframe.withColumn(feature_name, extract_feature(col('features')))
-                print(f"Created feature column: {feature_name}")
+
+                for ohe_category, index in self.ohe_mapping.items():
+
+                    if f"{feature_name}".replace("_ohe", "") == "_".join(ohe_category.split("_")[:-2]):
+                        ohe_col = ohe_category.replace("_index", "")
+                        if ohe_category == "principal_diagnosis_category_Diseases of the blood and blood-forming organs and certain disorders involving the immune mechanism_index":
+                            print(f"ohe_col : {ohe_col}" )
+
+                        if ohe_col in selected_columns:
+                            extract_ohe = F.udf(lambda v: float(v[index]) if v is not None else 0.0, FloatType())
+                            self.dataframe = self.dataframe.withColumn(ohe_col, extract_ohe(F.col(feature_name)))
+                            print(f"Created OHE column: {ohe_col} (index: {index})")
+                else:
+                    if feature_name in selected_columns:
+                        extract_feature = F.udf(lambda v: float(v[i]) if v is not None else None, FloatType())
+                        self.dataframe = self.dataframe.withColumn(feature_name, extract_feature(F.col('features')))
+                        print(f"Created column for feature: {feature_name}")
 
     def evaluate_feature_impact(self, start_index=None, end_index=None, batch_size=500):
 
@@ -760,7 +780,8 @@ class FeatureEngineer:
                 return
             else:
 
-                start_index = self.get_ohe_mapping_length() + len(self.numeric_cols) + self.code_to_index[diagnosis_code]
+                start_index = self.get_ohe_mapping_length() + len(self.numeric_cols) + self.code_to_index[
+                    diagnosis_code]
                 end_index = start_index + 1
 
         if start_index is None:
@@ -774,7 +795,6 @@ class FeatureEngineer:
         changes = {}
 
         for feature_index in range(start_index, end_index):
-
             modified_data_1 = np.copy(input_data)
             modified_data_1[:, feature_index] = 1
 
@@ -816,7 +836,8 @@ class FeatureEngineer:
 
         distinct_line_level_procedure_codes = self.dataframe.select(
             F.explode('servicelines').alias('procedure')
-        ).select('procedure.line_level_procedure_code').distinct().rdd.map(lambda row: row['line_level_procedure_code']).collect()
+        ).select('procedure.line_level_procedure_code').distinct().rdd.map(
+            lambda row: row['line_level_procedure_code']).collect()
 
         self.update_code_to_index(distinct_line_level_procedure_codes)
 
@@ -824,7 +845,6 @@ class FeatureEngineer:
 
         def generate_sparse_vector(procedure_codes):
             if procedure_codes is None:
-
                 size = len(code_to_index)
                 return SparseVector(size, [], [])
 
@@ -842,3 +862,73 @@ class FeatureEngineer:
         )
 
         return self.display_top_rows_as_pandas("line_level_procedures_ohe")
+
+    def display_column_info(self):
+
+        # Initialize a list to hold the column information
+        column_info = []
+        total_rows = self.dataframe.count()
+
+        # Get the first row of the DataFrame
+        first_row = self.dataframe.limit(1).collect()
+        if first_row:
+            first_row = first_row[0].asDict()
+        else:
+            first_row = {}
+
+        # Iterate over each column in the DataFrame
+        for col, dtype in self.dataframe.dtypes:
+            non_null_count = self.dataframe.filter(F.col(col).isNotNull()).count()
+            percent_non_null = (non_null_count / total_rows) * 100
+
+            sample_value = first_row.get(col, None)
+            most_frequent = self.dataframe.groupBy(col).count().orderBy(F.desc('count')).first()
+            most_frequent_value = most_frequent[col]
+            max_repeats = most_frequent['count']
+            distinct_count = self.dataframe.select(col).distinct().count()
+
+            if dtype in ['int', 'double', 'float']:
+                # For numeric columns
+                min_value = self.dataframe.agg(F.min(col)).collect()[0][0]
+                max_value = self.dataframe.agg(F.max(col)).collect()[0][0]
+
+            elif dtype == 'string':
+                # For string columns
+                min_value = self.dataframe.agg(F.min(F.length(col))).collect()[0][0]
+                max_value = self.dataframe.agg(F.max(F.length(col))).collect()[0][0]
+            elif dtype.startswith('date'):
+                # For date columns
+                min_value = self.dataframe.agg(F.min(col)).collect()[0][0]
+                max_value = self.dataframe.agg(F.max(col)).collect()[0][0]
+            else:
+                # For other types
+                min_value = None
+                max_value = None
+                max_repeats = None
+
+            column_info.append({
+                'Column Name': col,
+                'Non-null Count': non_null_count,
+                'Percent Non-null': percent_non_null,
+                'Min Value': min_value,
+                'Max Value': max_value,
+                'Max Repeats': max_repeats,
+                'Sample': sample_value,
+                'Data Type': dtype,
+                'most_frequent_value': most_frequent_value,
+                'max_repeats': max_repeats,
+                'distinct_count': distinct_count
+            })
+
+        # Convert the list to a pandas DataFrame
+        column_info_df = pd.DataFrame(column_info)
+        column_info_df = column_info_df.sort_values(by='Percent Non-null', ascending=False).reset_index(drop=True)
+
+        return column_info_df
+
+    def preprocess_features(self, feature_columns, label_column):
+
+        assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+        self.dataframe = assembler.transform(self.dataframe)
+        self.dataframe = self.dataframe.select("features", label_column)
+        return self.dataframe
