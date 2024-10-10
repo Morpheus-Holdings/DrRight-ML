@@ -83,6 +83,21 @@ class EDAAnalyzer:
 
         return column_info_df
 
+    def get_top_n_repeated_values_unique_per_patient(self, column_name: str, n: int = None):
+
+        df_values = self.dataframe.select("patient_id", column_name)
+        df_exploded = df_values.withColumn("diagnosis_code", F.explode(F.col(f"{column_name}.diagnosis_code")))
+
+        df_distinct_per_patient = df_exploded.dropDuplicates(["patient_id", "diagnosis_code"])
+        df_grouped = df_distinct_per_patient.groupBy("diagnosis_code").count()
+        df_grouped = df_grouped.withColumn("diagnosis_code_length", F.length(F.col("diagnosis_code")))
+
+        df_top_n = df_grouped.orderBy(F.desc("count"))
+        if n:
+            df_top_n = df_top_n.limit(n)
+        pandas_df = df_top_n.toPandas()
+        return pandas_df
+
     def get_top_n_repeated_values(self, column_name: str, n: int = None):
 
         column_dtype = dict(self.dataframe.dtypes)[column_name]
@@ -156,9 +171,12 @@ class EDAAnalyzer:
         results_df = pd.DataFrame(results)
         return results_df
 
-    def plot_percentile_based_cutoff(self, column_name: str, percentile: int = 90, cutoff_length: int = None):
+    def plot_percentile_based_cutoff(self, column_name: str, percentile: int = 90, cutoff_length: int = None, per_patient = False):
 
-        df_top_n = self.get_top_n_repeated_values(column_name, 1000)
+        if per_patient:
+            df_top_n = self.get_top_n_repeated_values_unique_per_patient(column_name, 1000)
+        else:
+            df_top_n = self.get_top_n_repeated_values(column_name, 1000)
 
         if cutoff_length:
             df_top_n = df_top_n[df_top_n['diagnosis_code_length']>cutoff_length]
@@ -187,3 +205,22 @@ class EDAAnalyzer:
 
         column_df = self.dataframe.select(column_name)
         return column_df.toPandas()
+
+    def plot_percentile_based_procedure_cutoff(self, column_name: str, percentile: int = 90, cutoff_length: int = None):
+
+        df_top_n = self.get_top_n_repeated_procedures(column_name, 1000)
+
+        if cutoff_length:
+            df_top_n = df_top_n[df_top_n['line_level_procedure_code_length']>cutoff_length]
+        percentile_threshold = np.percentile(df_top_n['count'], percentile)
+
+        plt.figure(figsize=(10, 6))
+        plt.hist(df_top_n['count'], bins=30, color='skyblue', alpha=0.7)
+        plt.axvline(percentile_threshold, color='red', linestyle='dashed', linewidth=2,
+                    label=f'{percentile}th Percentile = {percentile_threshold}')
+        plt.title(f'Distribution of Repeated Values and {percentile}th Percentile-Based Cutoff for {column_name}')
+        plt.xlabel('Count (Number of Repeats)')
+        plt.ylabel('Frequency')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
