@@ -321,7 +321,7 @@ class FeatureEngineer:
             self.autoencoder = keras.Model(inputs, decoded)
             self.encoder = keras.Model(inputs, encoded)
 
-            self.autoencoder.compile(optimizer='adam', loss='huber_loss')
+            self.autoencoder.compile(optimizer='adam', loss='huber')
 
         def spark_to_dataset(dataframe, batch_size):
             def generator():
@@ -932,3 +932,82 @@ class FeatureEngineer:
         self.dataframe = assembler.transform(self.dataframe)
         self.dataframe = self.dataframe.select("features", label_column)
         return self.dataframe
+
+    def preprocess_procedure_data(self, exclude_cols=None):
+    
+            if exclude_cols is None:
+                exclude_cols = []
+            self.impute_missing_values()
+    
+            string_cols = [field.name for field in self.dataframe.schema.fields if
+                           isinstance(field.dataType, StringType) and field.name not in exclude_cols]
+            date_cols = [field.name for field in self.dataframe.schema.fields if
+                         isinstance(field.dataType, DateType) and field.name not in exclude_cols]
+            numeric_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, (
+                FloatType, IntegerType, DoubleType)) and field.name not in exclude_cols]
+    
+            for date_col in date_cols:
+                if date_col in self.dataframe.columns:
+                    print(f"Processing date column: {date_col}")
+                    self.dataframe = self.dataframe.withColumn(f"{date_col}_year", F.year(col(date_col)).cast(DoubleType())) \
+                        .withColumn(f"{date_col}_month", F.month(col(date_col)).cast(DoubleType())) \
+                        .withColumn(f"{date_col}_day", F.dayofmonth(col(date_col)).cast(DoubleType()))
+    
+            for string_col in string_cols:
+                index_col = f"{string_col}_index"
+                try:
+                    indexer = StringIndexer(inputCol=string_col, outputCol=index_col).fit(self.dataframe)
+                    self.dataframe = indexer.transform(self.dataframe)
+                except Exception as e:
+                    print(f"Error in StringIndexer for {string_col} due to error: {e}")
+    
+            for col in string_cols:
+                col_index = f"{col}_index"
+                col_ohe = f"{col}_ohe"
+    
+                if col_index in self.dataframe.columns:
+                    try:
+                        onehot_encoder = OneHotEncoder(inputCols=[col_index], outputCols=[col_ohe], handleInvalid="keep")
+                        self.dataframe = onehot_encoder.fit(self.dataframe).transform(self.dataframe)
+                        print(f"One-Hot Encoding applied successfully to column: {col}")
+    
+                    except IllegalArgumentException as e:
+    
+                        print(f"Error applying OneHotEncoder to column: {col}")
+                        print(f"Error message: {str(e)}")
+    
+            ohe_columns = [f"{col}_ohe" for col in string_cols if f"{col}_ohe" in self.dataframe.columns]
+            # ['previous_diagnosis_ohe'] + \
+            self.feature_cols = ohe_columns + numeric_cols + \
+                                [f"{date_col}_year" for date_col in date_cols] + \
+                                [f"{date_col}_month" for date_col in date_cols] + \
+                                [f"{date_col}_day" for date_col in date_cols]
+    
+            print(f"Assembling all features into a vector with {len(self.feature_cols)} columns.")
+    
+            missing_cols = [col for col in self.feature_cols if col not in self.dataframe.columns]
+            if missing_cols:
+                print(f"Warning: The following columns are missing and will be excluded: {missing_cols}")
+    
+            assembler = VectorAssembler(inputCols=self.feature_cols, outputCol='features')
+            self.dataframe = assembler.transform(self.dataframe)
+    
+            print("Preprocessing complete. Feature vector created.")
+
+    def create_procedure_feature_name_map(self):
+
+        feature_name_map = {}
+        index_counter = 0
+
+        for col, ohe_indices in self.ohe_mapping.items():
+            feature_name_map[index_counter] = f"{col}"
+            index_counter += 1
+
+        for col in self.numeric_cols:
+            feature_name_map[index_counter] = col
+            index_counter += 1
+
+        for procedure, idx in self.code_to_index.items():
+            feature_name_map[index_counter + idx] = f"line_level_procedure_{procedure}"
+
+        self.feature_name_map = feature_name_map
