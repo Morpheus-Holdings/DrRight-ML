@@ -9,7 +9,7 @@ import seaborn as sns
 from keras import layers
 from pandas import DataFrame
 from pyspark.errors import IllegalArgumentException
-from pyspark.ml.feature import StringIndexer, VectorAssembler, OneHotEncoder
+from pyspark.ml.feature import StringIndexer, VectorAssembler, OneHotEncoder, RFormula
 from pyspark.ml.linalg import SparseVector, VectorUDT, DenseVector
 from pyspark.sql import Window
 from pyspark.sql.functions import col, when, mean, lit
@@ -18,6 +18,7 @@ from pyspark.sql.types import StringType, DoubleType, DateType, ArrayType
 from tensorflow import keras
 from tensorflow.keras import layers
 import tensorflow as tf
+
 
 
 class FeatureEngineer:
@@ -185,8 +186,8 @@ class FeatureEngineer:
             )
 
         for col_name in self.numeric_cols:
-            mean_value = self.dataframe.select(mean(col(col_name))).first()[0]
-            self.dataframe = self.dataframe.fillna({col_name: mean_value})
+            # mean_value = self.dataframe.select(mean(col(col_name))).first()[0]
+            self.dataframe = self.dataframe.fillna({col_name: -1})
 
         for col_name in date_cols:
             self.dataframe = self.dataframe.withColumn(col_name,
@@ -197,73 +198,21 @@ class FeatureEngineer:
         #     self.dataframe = self.dataframe.withColumn(col_name,
         #                                                when(col(col_name).isNull(), lit([])).otherwise(col(col_name)))
 
-    def preprocess_data(self, exclude_cols=None):
-
+    def preprocess_data(self, feature_cols, exclude_cols=None):
         if exclude_cols is None:
             exclude_cols = []
+
         self.impute_missing_values()
+        feature_cols = [col for col in feature_cols if col not in exclude_cols]
 
-        string_cols = [field.name for field in self.dataframe.schema.fields if
-                       isinstance(field.dataType, StringType) and field.name not in exclude_cols]
-        date_cols = [field.name for field in self.dataframe.schema.fields if
-                     isinstance(field.dataType, DateType) and field.name not in exclude_cols]
-        self.numeric_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, (
-            FloatType, IntegerType, DoubleType)) and field.name not in exclude_cols]
+        formula_str = "~ " + " + ".join(feature_cols)
+        r_formula = RFormula(formula=formula_str, featuresCol='features')
 
-        for date_col in date_cols:
-            if date_col in self.dataframe.columns:
-                print(f"Processing date column: {date_col}")
-                self.dataframe = self.dataframe.withColumn(f"{date_col}_year", F.year(col(date_col)).cast(DoubleType())) \
-                    .withColumn(f"{date_col}_month", F.month(col(date_col)).cast(DoubleType())) \
-                    .withColumn(f"{date_col}_day", F.dayofmonth(col(date_col)).cast(DoubleType()))
+        formula_model = r_formula.fit(self.dataframe)
+        self.dataframe = formula_model.transform(self.dataframe)
 
-        for string_col in string_cols:
-            index_col = f"{string_col}_index"
-            try:
-                indexer = StringIndexer(inputCol=string_col, outputCol=index_col).fit(self.dataframe)
-                self.dataframe = indexer.transform(self.dataframe)
-
-                mappings = indexer.labels
-                for idx, value in enumerate(mappings):
-                    value = value.replace(",", "")
-                    self.ohe_mapping[f"{string_col}_{value}_index"] = idx
-
-            except Exception as e:
-                print(f"Error in StringIndexer for {string_col} due to error: {e}")
-
-        for col in string_cols:
-            col_index = f"{col}_index"
-            col_ohe = f"{col}_ohe"
-
-            if col_index in self.dataframe.columns:
-                try:
-                    onehot_encoder = OneHotEncoder(inputCols=[col_index], outputCols=[col_ohe], handleInvalid="keep")
-                    self.dataframe = onehot_encoder.fit(self.dataframe).transform(self.dataframe)
-                    print(f"One-Hot Encoding applied successfully to column: {col}")
-
-                except IllegalArgumentException as e:
-
-                    print(f"Error applying OneHotEncoder to column: {col}")
-                    print(f"Error message: {str(e)}")
-
-        self.ohe_columns = [f"{col}_ohe" for col in string_cols if f"{col}_ohe" in self.dataframe.columns]
-
-        self.feature_cols = self.ohe_columns + self.numeric_cols + \
-                            ['previous_diagnosis_ohe'] + \
-                            [f"{date_col}_year" for date_col in date_cols] + \
-                            [f"{date_col}_month" for date_col in date_cols] + \
-                            [f"{date_col}_day" for date_col in date_cols]
-
-        print(f"Assembling all features into a vector with {len(self.feature_cols)} columns.")
-
-        missing_cols = [col for col in self.feature_cols if col not in self.dataframe.columns]
-        if missing_cols:
-            print(f"Warning: The following columns are missing and will be excluded: {missing_cols}")
-
-        assembler = VectorAssembler(inputCols=self.feature_cols, outputCol='features')
-        self.dataframe = assembler.transform(self.dataframe)
-
-        print("Preprocessing complete. Feature vector created.")
+        self.print_shape("DataFrame after RFormula", self.dataframe)
+        return self.dataframe
 
     def get_ohe_mapping(self):
         return self.ohe_mapping
