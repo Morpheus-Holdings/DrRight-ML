@@ -9,7 +9,7 @@ import seaborn as sns
 from keras import layers
 from pandas import DataFrame
 from pyspark.errors import IllegalArgumentException
-from pyspark.ml.feature import StringIndexer, VectorAssembler, OneHotEncoder, RFormula
+from pyspark.ml.feature import StringIndexer, VectorAssembler, OneHotEncoder
 from pyspark.ml.linalg import SparseVector, VectorUDT, DenseVector
 from pyspark.sql import Window
 from pyspark.sql.functions import col, when, mean, lit
@@ -198,21 +198,61 @@ class FeatureEngineer:
         #     self.dataframe = self.dataframe.withColumn(col_name,
         #                                                when(col(col_name).isNull(), lit([])).otherwise(col(col_name)))
 
-    def preprocess_data(self, feature_cols, exclude_cols=None):
+    def preprocess_data(self, exclude_cols=None):
         if exclude_cols is None:
             exclude_cols = []
 
         self.impute_missing_values()
-        feature_cols = [col for col in feature_cols if col not in exclude_cols]
 
-        formula_str = "~ " + " + ".join(feature_cols)
-        r_formula = RFormula(formula=formula_str, featuresCol='features')
+        string_cols = [field.name for field in self.dataframe.schema.fields if
+                    isinstance(field.dataType, StringType) and field.name not in exclude_cols]
+        date_cols = [field.name for field in self.dataframe.schema.fields if
+                    isinstance(field.dataType, DateType) and field.name not in exclude_cols]
+        self.numeric_cols = [field.name for field in self.dataframe.schema.fields if isinstance(field.dataType, (
+            FloatType, IntegerType, DoubleType)) and field.name not in exclude_cols]
 
-        formula_model = r_formula.fit(self.dataframe)
-        self.dataframe = formula_model.transform(self.dataframe)
+        for date_col in date_cols:
+            if date_col in self.dataframe.columns:
+                print(f"Processing date column: {date_col}")
+                self.dataframe = self.dataframe.withColumn(f"{date_col}_year", F.year(col(date_col)).cast(DoubleType())) \
+                    .withColumn(f"{date_col}_month", F.month(col(date_col)).cast(DoubleType())) \
+                    .withColumn(f"{date_col}_day", F.dayofmonth(col(date_col)).cast(DoubleType()))
 
-        self.print_shape("DataFrame after RFormula", self.dataframe)
-        return self.dataframe
+        for string_col in string_cols:
+
+            distinct_values = self.dataframe.select(string_col).distinct().rdd.flatMap(lambda x: x).collect()
+            mapping = {value: idx for idx, value in enumerate(distinct_values)}
+
+            self.dataframe = self.dataframe.withColumn(f"{string_col}_index", 
+                                                    F.when(col(string_col).isNotNull(), 
+                                                            col(string_col).cast(StringType())).otherwise(lit(None)))
+            
+            for value, idx in mapping.items():
+                self.dataframe = self.dataframe.withColumn(f"{string_col}_{value}_ohe", 
+                                                        F.when(col(string_col) == value, 1).otherwise(0))
+
+            for idx, value in enumerate(mapping):
+                value = value.replace(",", "")
+                self.ohe_mapping[f"{string_col}_{value}_index"] = idx
+
+        self.ohe_columns = [f"{col}_{value}_ohe" for col in string_cols for value in mapping.keys()]
+
+        self.feature_cols = self.ohe_columns + self.numeric_cols + \
+                            ['previous_diagnosis_ohe'] + \
+                            [f"{date_col}_year" for date_col in date_cols] + \
+                            [f"{date_col}_month" for date_col in date_cols] + \
+                            [f"{date_col}_day" for date_col in date_cols]
+
+        print(f"Assembling all features into a vector with {len(self.feature_cols)} columns.")
+
+        missing_cols = [col for col in self.feature_cols if col not in self.dataframe.columns]
+        if missing_cols:
+            print(f"Warning: The following columns are missing and will be excluded: {missing_cols}")
+
+        self.dataframe = self.dataframe.withColumn("features", 
+            F.array(*[col(c) for c in self.feature_cols if c not in missing_cols]))
+
+        print("Preprocessing complete. Feature vector created.")
 
     def get_ohe_mapping(self):
         return self.ohe_mapping
