@@ -224,3 +224,18 @@ class EDAAnalyzer:
         plt.legend()
         plt.grid(True)
         plt.show()
+
+    def get_top_n_repeated_procedures_unique_per_patient(self, column_name: str, n: int = None):
+
+        df_values = self.dataframe.select("patient_id", column_name)
+        df_exploded = df_values.withColumn("line_level_procedure_code", F.explode(F.col(f"{column_name}.line_level_procedure_code")))
+
+        df_distinct_per_patient = df_exploded.dropDuplicates(["patient_id", "line_level_procedure_code"])
+        df_grouped = df_distinct_per_patient.groupBy("line_level_procedure_code").count()
+        df_grouped = df_grouped.withColumn("line_level_procedure_code_length", F.length(F.col("line_level_procedure_code")))
+
+        df_top_n = df_grouped.orderBy(F.desc("count"))
+        if n:
+            df_top_n = df_top_n.limit(n)
+        pandas_df = df_top_n.toPandas()
+        return pandas_df

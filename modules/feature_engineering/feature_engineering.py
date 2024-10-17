@@ -621,43 +621,36 @@ class FeatureEngineer:
             F.array_distinct(F.flatten(F.collect_list('line_level_procedure_code_date').over(window_spec)))
         )
 
-        distinct_line_level_procedure_codes = df.select(F.explode('servicelines').alias('procedures')) \
-            .select('procedures.line_level_procedure_code') \
-            .distinct() \
-            .rdd.map(lambda row: row['line_level_procedure_code']) \
-            .collect()
+        self.dataframe = self.dataframe.withColumn(
+            'servicelines_flat',
+            F.expr("transform(servicelines, x -> x.line_level_procedure_code)")
+        )
+
+        distinct_line_level_procedure_codes_df = self.dataframe.select(
+            F.explode('servicelines_flat').alias('line_level_procedure_code')
+        ).distinct()
+
+        distinct_line_level_procedure_codes = [row['line_level_procedure_code'] for row in distinct_line_level_procedure_codes_df.collect()]
 
         code_to_index = {code: idx for idx, code in enumerate(distinct_line_level_procedure_codes)}
 
-        def compute_decay(current_claim_date, line_level_procedure_date):
-            decay_values = {}
+        def compute_decay(claim_date, previous_procedures):
+            if previous_procedures is None or claim_date is None:
+                return SparseVector(len(code_to_index), [], [])
 
-            for line_level_procedure in line_level_procedure_date:
-                line_level_procedure_code = line_level_procedure['line_level_procedure_code']
-                line_level_procedure_date = line_level_procedure['line_level_procedure_date']
+            decay_dict = defaultdict(float)
 
-                if line_level_procedure_date is not None:
+            for line_level_procedure_code, date in previous_procedures:
+                if date is not None:
+                    if line_level_procedure_code in code_to_index:
+                        index = code_to_index[line_level_procedure_code]
+                        decay_factor = decay_rate ** (claim_date - date).days
+                        decay_dict[index] += decay_factor
 
-                    time_difference = (current_claim_date - line_level_procedure_date).days
-                    decay_value = np.exp(-decay_rate * time_difference)
+            indices = sorted(decay_dict.keys())
+            values = [decay_dict[idx] for idx in indices]
 
-                    if line_level_procedure_code in decay_values:
-                        decay_values[line_level_procedure_code] += decay_value
-                    else:
-                        decay_values[line_level_procedure_code] = decay_value
-
-            indices = []
-            values = []
-
-            for code in distinct_line_level_procedure_codes:
-                if code in decay_values:
-                    indices.append(code_to_index[code])
-                    values.append(decay_values[code])
-                else:
-                    indices.append(code_to_index[code])
-                    values.append(0.0)
-
-            return SparseVector(len(distinct_line_level_procedure_codes), indices, values)
+            return SparseVector(len(code_to_index), indices, values)
 
         compute_decay_udf = F.udf(compute_decay, VectorUDT())
 
@@ -667,8 +660,8 @@ class FeatureEngineer:
         )
 
         self.dataframe = df
-
-        self.print_shape("DataFrame After Adding Previous Procedures OHE with Exponential Decay", self.dataframe)
+        self.code_to_index = code_to_index
+        return self.display_top_rows_as_pandas("previous_line_level_procedure_ohe")
 
     def display_shape(self):
         df_rows = self.dataframe.count()
@@ -976,9 +969,10 @@ class FeatureEngineer:
                         print(f"Error applying OneHotEncoder to column: {col}")
                         print(f"Error message: {str(e)}")
     
-            ohe_columns = [f"{col}_ohe" for col in string_cols if f"{col}_ohe" in self.dataframe.columns]
-            # ['previous_diagnosis_ohe'] + \
-            self.feature_cols = ohe_columns + numeric_cols + \
+            self.ohe_columns = [f"{col}_ohe" for col in string_cols if f"{col}_ohe" in self.dataframe.columns]
+             
+            self.feature_cols = self.ohe_columns + self.numeric_cols + \
+                                ['previous_line_level_procedure_ohe'] + \
                                 [f"{date_col}_year" for date_col in date_cols] + \
                                 [f"{date_col}_month" for date_col in date_cols] + \
                                 [f"{date_col}_day" for date_col in date_cols]
@@ -1011,3 +1005,36 @@ class FeatureEngineer:
             feature_name_map[index_counter + idx] = f"line_level_procedure_{procedure}"
 
         self.feature_name_map = feature_name_map
+
+    def expand_procedure_features(self, selected_columns):
+
+        feature_cols = self.feature_cols
+
+        for i, feature_name in enumerate(feature_cols):
+
+            if feature_name == 'previous_line_level_procedure_ohe':
+                for procedure_code, index in self.code_to_index.items():
+                    procedure_col = f"line_level_procedure_{procedure_code}"
+                    if procedure_col in selected_columns:
+                        extract_procedure = F.udf(lambda v: float(v[index]) if v is not None else None, FloatType())
+                        self.dataframe = self.dataframe.withColumn(procedure_col,
+                                                                   extract_procedure(F.col('features')))
+                        print(f"Created column for procedure code: {procedure_code} (index: {index})")
+            else:
+
+                for ohe_category, index in self.ohe_mapping.items():
+
+                    if f"{feature_name}".replace("_ohe", "") == "_".join(ohe_category.split("_")[:-2]):
+                        ohe_col = ohe_category.replace("_index", "")
+                        # if ohe_category == "principal_diagnosis_category_Diseases of the blood and blood-forming organs and certain disorders involving the immune mechanism_index":
+                        #     print(f"ohe_col : {ohe_col}" )
+
+                        if ohe_col in selected_columns:
+                            extract_ohe = F.udf(lambda v: float(v[index]) if v is not None else 0.0, FloatType())
+                            self.dataframe = self.dataframe.withColumn(ohe_col, extract_ohe(F.col(feature_name)))
+                            print(f"Created OHE column: {ohe_col} (index: {index})")
+                else:
+                    if feature_name in selected_columns:
+                        extract_feature = F.udf(lambda v: float(v[i]) if v is not None else None, FloatType())
+                        self.dataframe = self.dataframe.withColumn(feature_name, extract_feature(F.col('features')))
+                        print(f"Created column for feature: {feature_name}")
