@@ -1,3 +1,4 @@
+import datetime
 import os
 from collections import defaultdict
 
@@ -28,6 +29,7 @@ class FeatureEngineer:
         return sys.version
 
     def __init__(self, spark_manager):
+        self.input_dim = None
         self.feature_name_map = None
         self.code_to_index_length = None
         self.ohe_mapping_length = None
@@ -249,8 +251,23 @@ class FeatureEngineer:
         if missing_cols:
             print(f"Warning: The following columns are missing and will be excluded: {missing_cols}")
 
-        self.dataframe = self.dataframe.withColumn("features", 
-            F.array(*[col(c) for c in self.feature_cols if c not in missing_cols]))
+        def sparse_to_dense(sparse_vector):
+            if sparse_vector is None:
+                return DenseVector([])
+            return DenseVector(sparse_vector.toArray())
+
+        sparse_to_dense_udf = F.udf(sparse_to_dense, VectorUDT())
+
+        self.dataframe = self.dataframe.withColumn(
+            'previous_diagnosis_ohe_dense',
+            sparse_to_dense_udf(F.col('previous_diagnosis_ohe'))
+        )
+
+        # Combine all features into a single array
+        self.dataframe = self.dataframe.withColumn(
+            'features',
+            F.array(*[F.col(c).cast(DoubleType()) for c in self.feature_cols if c != 'previous_diagnosis_ohe'] + [F.col('previous_diagnosis_ohe_dense')])
+        )
 
         print("Preprocessing complete. Feature vector created.")
 
@@ -298,14 +315,15 @@ class FeatureEngineer:
 
         self.dataframe.cache()
         self.dataframe = self.dataframe.select("features")
+        self.input_dim = self.dataframe.head()["features"][0].size
 
         strategy = tf.distribute.MirroredStrategy()
 
         with strategy.scope():
-            input_dim = self.dataframe.head()["features"].size
-            inputs = keras.Input(shape=(input_dim,))
+            
+            inputs = keras.Input(shape=(self.input_dim,))
             encoded = keras.layers.Dense(100, activation='relu')(inputs)
-            decoded = keras.layers.Dense(input_dim, activation='sigmoid')(encoded)
+            decoded = keras.layers.Dense(self.input_dim, activation='sigmoid')(encoded)
 
             self.autoencoder = keras.Model(inputs, decoded)
             self.encoder = keras.Model(inputs, encoded)
@@ -315,7 +333,7 @@ class FeatureEngineer:
         def spark_to_dataset(dataframe, batch_size):
             def generator():
                 for row in dataframe.toLocalIterator():
-                    features = row["features"]
+                    features = row["features"][0]
                     yield np.array(features.toArray()), np.array(features.toArray())
 
             dataset = tf.data.Dataset.from_generator(
@@ -424,7 +442,9 @@ class FeatureEngineer:
                 if date is not None:
                     if diagnosis_code in code_to_index:
                         index = code_to_index[diagnosis_code]
-                        decay_factor = decay_rate ** (claim_date - date).days
+                        days_diff = (claim_date - date).days if isinstance(claim_date, datetime.date) and isinstance(
+                            date, datetime.date) else 0
+                        decay_factor = decay_rate ** days_diff
                         decay_dict[index] += decay_factor
 
             indices = sorted(decay_dict.keys())
@@ -921,3 +941,24 @@ class FeatureEngineer:
         self.dataframe = assembler.transform(self.dataframe)
         self.dataframe = self.dataframe.select("features", label_column)
         return self.dataframe
+
+    def truncate_diagnosis_codes(self):
+        df = self.dataframe
+
+        df = df.withColumn(
+            "claim_all_diagnosis_codes",
+            F.expr("""
+                transform(claim_all_diagnosis_codes, x -> 
+                    struct(
+                        x.diagnosis_code_set,
+                        CASE WHEN length(x.diagnosis_code) > 5 
+                             THEN substring(x.diagnosis_code, 1, 4) 
+                             ELSE x.diagnosis_code 
+                        END AS diagnosis_code,
+                        x.diagnosis_pointer
+                    )
+                )
+            """)
+        )
+
+        self.dataframe = df
