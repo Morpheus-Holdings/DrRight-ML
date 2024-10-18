@@ -149,6 +149,25 @@ class FeatureEngineer:
         df = df.withColumn('continuous_visit_years', F.row_number().over(consecutive_window))
         self.dataframe = df
 
+    def filter_by_continuous_visit_years(self, min_continuous_years: int):
+
+        df = self.dataframe.filter(F.col('continuous_visit_years') >= min_continuous_years)
+        self.print_shape(f"Dataframe post removing less than {min_continuous_years} continuous visits", df)
+        self.dataframe = df
+
+    def get_unique_value_counts(self, column_name: str):
+
+        df_counts = self.dataframe.groupBy(column_name).count()
+        total_count = self.dataframe.count()
+
+        df_counts = df_counts.withColumn(
+            'percentage',
+            (F.col('count') / total_count) * 100
+        )
+
+        df_counts = df_counts.orderBy(F.col('count').desc())
+        return df_counts.show()
+
     def get_min_max(self, column_name: str):
         df = self.dataframe
 

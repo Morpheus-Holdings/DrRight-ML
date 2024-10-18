@@ -1,7 +1,7 @@
 import os
 
 import pyspark.sql.functions as F
-from pyspark.ml.classification import MultilayerPerceptronClassifier
+from pyspark.ml.classification import MultilayerPerceptronClassifier, MultilayerPerceptronClassificationModel
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 from pyspark.ml.feature import Bucketizer
 from pyspark.sql.types import IntegerType
@@ -18,7 +18,7 @@ class MLPModelBuilder:
         self.label_column = label_column
         self.train_df = None
         self.test_df = None
-        self.bucketer = None  # For binning
+        self.bucketer = None
         self.max_claim_amount = model_data.select(F.max(label_column)).first()[0]
 
     def split_data(self, test_size=0.2, random_state=42):
@@ -80,7 +80,7 @@ class MLPModelBuilder:
     @classmethod
     def load_model(cls, model_data, feature_columns, label_column, model_name="MLP_model", path=None):
         load_path = path if path else os.path.join(os.getcwd())
-        model = MultilayerPerceptronClassifier.load(load_path)
+        model = MultilayerPerceptronClassificationModel.load(load_path)
         instance = cls(model_data, feature_columns, label_column, model_name=model_name)
         instance.mlp_model = model
         return instance
@@ -110,7 +110,16 @@ class MLPModelBuilder:
         if self.train_predictions is None:
             self.train_predictions = self.mlp_model.transform(self.train_df)
 
-        bin_udf = F.udf(lambda x: int(x // (self.max_claim_amount / num_bins)), IntegerType())
+        # Calculate the bin size once
+        bin_size = self.max_claim_amount / num_bins
+
+        # Define UDF outside of the DataFrame operations
+        def bin_function(x):
+            return int(x // bin_size) if x is not None else None
+
+        bin_udf = F.udf(bin_function, IntegerType())
+
+        # Use the UDF to create the "predicted_bin" column
         self.train_predictions = self.train_predictions.withColumn("predicted_bin", bin_udf(F.col("prediction")))
 
         avg_claim_pred_train = self.train_predictions.groupBy("predicted_bin").agg(
@@ -123,12 +132,19 @@ class MLPModelBuilder:
         if self.test_predictions is None:
             self.test_predictions = self.mlp_model.transform(self.test_df)
 
-        bin_udf = F.udf(lambda x: int(x // (self.max_claim_amount / num_bins)), IntegerType())
-        self.test_predictions = self.test_predictions.withColumn("predicted_bin", bin_udf(F.col("prediction")))
+        # Calculate the bin size once
+        bin_size = self.max_claim_amount / num_bins
+
+        # Use a simple arithmetic operation to create the predicted_bin column
+        self.test_predictions = self.test_predictions.withColumn(
+            "predicted_bin",
+            (F.col("prediction") / bin_size).cast(IntegerType())
+        )
 
         avg_claim_pred_test = self.test_predictions.groupBy("predicted_bin").agg(
             F.avg(self.label_column).alias("average_claim_amount")
         ).orderBy("predicted_bin")
 
         return avg_claim_pred_test
+
 
