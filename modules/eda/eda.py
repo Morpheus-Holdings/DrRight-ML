@@ -206,9 +206,12 @@ class EDAAnalyzer:
         column_df = self.dataframe.select(column_name)
         return column_df.toPandas()
 
-    def plot_percentile_based_procedure_cutoff(self, column_name: str, percentile: int = 90, cutoff_length: int = None):
+    def plot_percentile_based_procedure_cutoff(self, column_name: str, percentile: int = 90, cutoff_length: int = None, per_patient = False):
 
-        df_top_n = self.get_top_n_repeated_procedures(column_name, 1000)
+        if per_patient:
+            df_top_n = self.get_top_n_repeated_procedures_unique_per_patient(column_name, 1000)
+        else:
+            df_top_n = self.get_top_n_repeated_procedures(column_name, 1000)
 
         if cutoff_length:
             df_top_n = df_top_n[df_top_n['line_level_procedure_code_length']>cutoff_length]
